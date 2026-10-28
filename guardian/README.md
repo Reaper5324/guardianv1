@@ -57,9 +57,10 @@ Unknown JSON fields, invalid domain rules, non-loopback listen addresses, hostna
 
 ## Run from source
 
-From this directory, build and run the console version:
+From the repository root, build and run the console version:
 
 ```sh
+cd guardian
 go build -o guardian ./cmd/guardian
 go run ./cmd/guardian run -config config.json
 ```
@@ -75,10 +76,16 @@ The first query should be forwarded; a blocked name should return `NXDOMAIN`. To
 
 ## Install as a Windows service
 
-Build a Windows executable on Windows or with a Go toolchain configured for Windows, then open an **Administrator** PowerShell or Command Prompt in this directory. Example PowerShell commands:
+Build the Windows executable on Windows, or cross-compile it on another platform from the repository root. For example, in a POSIX shell:
+
+```sh
+cd guardian
+GOOS=windows GOARCH=amd64 go build -o guardian.exe ./cmd/guardian
+```
+
+For a Windows ARM64 system, use `GOARCH=arm64` instead. Copy `guardian.exe` and `config.json` to the Windows computer. Open an **Administrator** PowerShell or Command Prompt in the directory containing them and install:
 
 ```powershell
-go build -o guardian.exe ./cmd/guardian
 .\guardian.exe install -config .\config.json
 ```
 
