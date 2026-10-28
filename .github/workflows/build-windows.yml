@@ -1,0 +1,46 @@
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "guardian/**"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: guardian/go.mod
+
+      - name: Prepare output directory
+        working-directory: guardian
+        run: New-Item -ItemType Directory -Force dist | Out-Null
+        shell: pwsh
+
+      - name: Build Windows executable
+        working-directory: guardian
+        run: go build -trimpath -ldflags="-s -w" -o dist/guardian.exe ./cmd/guardian
+
+      - name: Include example configuration
+        working-directory: guardian
+        run: Copy-Item config.example.json dist/config.example.json
+        shell: pwsh
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: guardian-windows-amd64
+          path: guardian/dist/*
+          if-no-files-found: error
+          retention-days: 14
