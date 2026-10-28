@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 // Window is a daily time range in local time, "HH:MM". Overnight ranges
@@ -128,16 +126,34 @@ func (c *Config) validate() error {
 		domains []string
 	}{{"blocked_domains", c.BlockedDomains}, {"allowed_domains", c.AllowedDomains}} {
 		for _, domain := range list.domains {
-			domain = strings.TrimSuffix(strings.TrimSpace(domain), ".")
-			if domain == "" {
-				return fmt.Errorf("%s: domains must not be empty", list.name)
+			if strings.TrimSpace(domain) != domain {
+				return fmt.Errorf("%s: invalid domain %q", list.name, domain)
 			}
-			if _, ok := dns.IsDomainName(domain); !ok {
+			domain = strings.TrimSuffix(domain, ".")
+			if !validDomainName(domain) {
 				return fmt.Errorf("%s: invalid domain %q", list.name, domain)
 			}
 		}
 	}
 	return nil
+}
+
+func validDomainName(domain string) bool {
+	if len(domain) == 0 || len(domain) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			ch := label[i]
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func parseHM(s string) (int, error) {

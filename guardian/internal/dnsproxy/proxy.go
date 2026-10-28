@@ -106,36 +106,49 @@ func (p *Proxy) Run(ctx context.Context) error {
 	started := make(chan struct{}, 2)
 	udp.NotifyStartedFunc = func() { started <- struct{}{} }
 	tcp.NotifyStartedFunc = func() { started <- struct{}{} }
+	startedEvents := (<-chan struct{})(started)
 	errC := make(chan error, 2)
 	go func() { errC <- udp.ActivateAndServe() }()
 	go func() { errC <- tcp.ActivateAndServe() }()
 
-	var err error
 	completed := 0
 	startedCount := 0
 	ctxDone := ctx.Done()
-	for startedCount < 2 && completed < 2 {
+	var runErr error
+	stopping := false
+	for !stopping {
 		select {
 		case <-ctxDone:
 			ctxDone = nil
-		case <-started:
+			stopping = true
+		case <-startedEvents:
 			startedCount++
+			if startedCount == 2 {
+				// Both listeners are serving; wait only for cancellation or
+				// an unexpected listener exit from this point onward.
+				startedEvents = nil
+			}
 		case serverErr := <-errC:
 			completed++
-			if err == nil && serverErr != nil {
-				err = serverErr
+			if runErr == nil {
+				runErr = serverErr
+				if runErr == nil && ctx.Err() == nil {
+					runErr = fmt.Errorf("DNS listener stopped unexpectedly")
+				}
 			}
+			stopping = true
 		}
 	}
 	_ = udp.Shutdown()
 	_ = tcp.Shutdown()
+	// Close the underlying sockets as well: Shutdown can race with a server
+	// goroutine that has not yet entered ActivateAndServe.
+	_ = packetConn.Close()
+	_ = tcpListener.Close()
 	for ; completed < 2; completed++ {
-		serverErr := <-errC
-		if err == nil && serverErr != nil {
-			err = serverErr
-		}
+		<-errC
 	}
-	return err
+	return runErr
 }
 
 // ServeDNS implements dns.Handler.
@@ -201,13 +214,13 @@ func (p *Proxy) forward(cfg *config.Config, r *dns.Msg) (*dns.Msg, error) {
 	}
 	var lastErr error
 	for range cfg.UpstreamDoH {
-		result := <-results
-		if result.err != nil {
-			lastErr = result.err
+		got := <-results
+		if got.err != nil {
+			lastErr = got.err
 			continue
 		}
-		result.resp.Id = r.Id
-		return result.resp, nil
+		got.resp.Id = r.Id
+		return got.resp, nil
 	}
 	return nil, lastErr
 }

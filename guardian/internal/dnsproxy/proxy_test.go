@@ -1,6 +1,7 @@
 package dnsproxy
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -93,7 +95,6 @@ func TestServeDNSWithTLSDoH(t *testing.T) {
 	client := server.Client()
 	transport := client.Transport.(*http.Transport).Clone()
 	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
-	transport.TLSClientConfig.ServerName = "localhost"
 	transport.TLSClientConfig.MinVersion = tls.VersionTLS12
 	client = &http.Client{Transport: transport}
 	p := makeProxy(t, upstream, client, []string{"blocked.test"}, []string{"safe.blocked.test"})
@@ -137,7 +138,6 @@ func TestForwardFailsClosed(t *testing.T) {
 	client := server.Client()
 	transport := client.Transport.(*http.Transport).Clone()
 	transport.TLSClientConfig = transport.TLSClientConfig.Clone()
-	transport.TLSClientConfig.ServerName = "localhost"
 	transport.TLSClientConfig.MinVersion = tls.VersionTLS12
 	client = &http.Client{Transport: transport}
 	p := makeProxy(t, "https://127.0.0.1:"+port+"/dns-query", client, nil, nil)
@@ -150,5 +150,91 @@ func TestForwardFailsClosed(t *testing.T) {
 	p.ServeDNS(w, q)
 	if w.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("Rcode = %d, want SERVFAIL", w.msg.Rcode)
+	}
+}
+
+func makeProxyForAddr(t *testing.T, addr string) *Proxy {
+	t.Helper()
+	c := config.Default()
+	c.ListenAddr = addr
+	c.BlockedDomains = []string{"blocked.test"}
+	store := &config.Store{}
+	if err := store.Set(&c); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestRunWaitsUntilContextCancelled(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(probe.Addr().String())
+	if err != nil {
+		probe.Close()
+		t.Fatal(err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p := makeProxyForAddr(t, net.JoinHostPort("127.0.0.1", port))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	query := new(dns.Msg)
+	query.SetQuestion("blocked.test.", dns.TypeA)
+	for _, network := range []string{"udp", "tcp"} {
+		client := &dns.Client{Net: network, Timeout: time.Second}
+		response, _, err := client.Exchange(query, p.current.Load().cfg.ListenAddr)
+		if err != nil {
+			cancel()
+			t.Fatalf("%s DNS query: %v", network, err)
+		}
+		if response.Rcode != dns.RcodeNameError {
+			cancel()
+			t.Fatalf("%s response code = %d, want NXDOMAIN", network, response.Rcode)
+		}
+	}
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned before cancellation: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
+func TestRunReturnsWhenTCPPortIsBusy(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	addr := listener.Addr().String()
+	p := makeProxyForAddr(t, addr)
+	done := make(chan error, 1)
+	go func() { done <- p.Run(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run succeeded despite occupied TCP port")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not fail promptly for occupied TCP port")
 	}
 }

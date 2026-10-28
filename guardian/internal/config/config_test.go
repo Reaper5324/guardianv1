@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,6 +58,33 @@ func TestParseRejectsInvalidConfiguration(t *testing.T) {
 				t.Fatal("Parse succeeded; expected validation error")
 			}
 		})
+	}
+}
+
+func TestParseRejectsMalformedDomains(t *testing.T) {
+	for _, domain := range []string{
+		"bad domain.test",
+		"bad..test",
+		"-bad.test",
+		"bad-.test",
+		"bad_name.test",
+		strings.Repeat("a", 64) + ".test",
+	} {
+		t.Run(domain, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"blocked_domains": []string{domain}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Parse(raw); err == nil {
+				t.Fatalf("Parse accepted invalid domain %q", domain)
+			}
+		})
+	}
+}
+
+func TestParseAcceptsValidDomainWithTrailingDot(t *testing.T) {
+	if _, err := Parse([]byte(`{"blocked_domains":["Example.COM."]}`)); err != nil {
+		t.Fatalf("Parse rejected valid domain: %v", err)
 	}
 }
 
