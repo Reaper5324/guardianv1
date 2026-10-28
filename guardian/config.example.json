@@ -1,0 +1,10 @@
+{
+  "listen_addr": "127.0.0.1:5353",
+  "upstream_doh": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"],
+  "blocked_services": ["instagram", "tiktok", "snapchat"],
+  "blocked_domains": [],
+  "allowed_domains": [],
+  "block_doh_providers": true,
+  "bedtime": { "start": "22:00", "end": "06:00" },
+  "timezone": "Africa/Johannesburg"
+}
