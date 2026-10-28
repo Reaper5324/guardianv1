@@ -21,17 +21,29 @@ import (
 
 type Proxy struct {
 	store   *config.Store
-	matcher atomic.Pointer[blocklist.Matcher]
+	current atomic.Pointer[snapshot]
 	client  *http.Client
 
 	// OnBlocked, if set, is called for every blocked query.
 	OnBlocked func(name, client string)
 }
 
+type snapshot struct {
+	cfg     *config.Config
+	matcher *blocklist.Matcher
+}
+
 func New(store *config.Store) (*Proxy, error) {
 	p := &Proxy{
 		store:  store,
-		client: &http.Client{Timeout: 5 * time.Second},
+		client: &http.Client{
+			Timeout: 1800 * time.Millisecond,
+			Transport: &http.Transport{
+				// Guardian must connect directly to the configured IP literal;
+				// environment proxy settings must not redirect this traffic.
+				Proxy: nil,
+			},
+		},
 	}
 	if err := p.Reload(); err != nil {
 		return nil, err
@@ -42,11 +54,15 @@ func New(store *config.Store) (*Proxy, error) {
 // Reload rebuilds the matcher from the current config. On error the previous
 // matcher stays active.
 func (p *Proxy) Reload() error {
-	m, err := buildMatcher(p.store.Get())
+	c := p.store.Get()
+	if c == nil {
+		return fmt.Errorf("no active config")
+	}
+	m, err := buildMatcher(c)
 	if err != nil {
 		return err
 	}
-	p.matcher.Store(m)
+	p.current.Store(&snapshot{cfg: c, matcher: m})
 	return nil
 }
 
@@ -67,37 +83,76 @@ func buildMatcher(c *config.Config) (*blocklist.Matcher, error) {
 
 // Run serves UDP and TCP until ctx is cancelled or a listener fails.
 func (p *Proxy) Run(ctx context.Context) error {
-	addr := p.store.Get().ListenAddr
+	state := p.current.Load()
+	if state == nil {
+		return fmt.Errorf("no active config")
+	}
+	addr := state.cfg.ListenAddr
 	mux := dns.NewServeMux()
 	mux.Handle(".", p)
 
-	udp := &dns.Server{Addr: addr, Net: "udp", Handler: mux}
-	tcp := &dns.Server{Addr: addr, Net: "tcp", Handler: mux}
+	packetConn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return fmt.Errorf("listen UDP %s: %w", addr, err)
+	}
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		packetConn.Close()
+		return fmt.Errorf("listen TCP %s: %w", addr, err)
+	}
+	udp := &dns.Server{PacketConn: packetConn, Handler: mux}
+	tcp := &dns.Server{Listener: tcpListener, Handler: mux}
 
-	errc := make(chan error, 2)
-	go func() { errc <- udp.ListenAndServe() }()
-	go func() { errc <- tcp.ListenAndServe() }()
+	started := make(chan struct{}, 2)
+	udp.NotifyStartedFunc = func() { started <- struct{}{} }
+	tcp.NotifyStartedFunc = func() { started <- struct{}{} }
+	errC := make(chan error, 2)
+	go func() { errC <- udp.ActivateAndServe() }()
+	go func() { errC <- tcp.ActivateAndServe() }()
 
 	var err error
-	select {
-	case <-ctx.Done():
-	case err = <-errc:
+	completed := 0
+	startedCount := 0
+	ctxDone := ctx.Done()
+	for startedCount < 2 && completed < 2 {
+		select {
+		case <-ctxDone:
+			ctxDone = nil
+		case <-started:
+			startedCount++
+		case serverErr := <-errC:
+			completed++
+			if err == nil && serverErr != nil {
+				err = serverErr
+			}
+		}
 	}
 	_ = udp.Shutdown()
 	_ = tcp.Shutdown()
+	for ; completed < 2; completed++ {
+		serverErr := <-errC
+		if err == nil && serverErr != nil {
+			err = serverErr
+		}
+	}
 	return err
 }
 
 // ServeDNS implements dns.Handler.
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	if len(r.Question) != 1 {
+	if r.Response || r.Opcode != dns.OpcodeQuery || len(r.Question) != 1 || r.Question[0].Qclass != dns.ClassINET {
 		p.reply(w, r, new(dns.Msg).SetRcode(r, dns.RcodeFormatError))
 		return
 	}
 	q := r.Question[0]
-	cfg := p.store.Get()
+	state := p.current.Load()
+	if state == nil {
+		p.reply(w, r, new(dns.Msg).SetRcode(r, dns.RcodeServerFailure))
+		return
+	}
+	cfg := state.cfg
 
-	if p.shouldBlock(cfg, q.Name) {
+	if p.shouldBlock(cfg, state.matcher, q.Name) {
 		if p.OnBlocked != nil {
 			p.OnBlocked(q.Name, w.RemoteAddr().String())
 		}
@@ -114,8 +169,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	p.reply(w, r, resp)
 }
 
-func (p *Proxy) shouldBlock(cfg *config.Config, name string) bool {
-	m := p.matcher.Load()
+func (p *Proxy) shouldBlock(cfg *config.Config, m *blocklist.Matcher, name string) bool {
 	if m.Blocked(name) {
 		return true
 	}
@@ -128,21 +182,38 @@ func (p *Proxy) forward(cfg *config.Config, r *dns.Msg) (*dns.Msg, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lastErr error
+	if len(cfg.UpstreamDoH) == 0 {
+		return nil, fmt.Errorf("no DoH upstreams configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+	type result struct {
+		resp *dns.Msg
+		err  error
+	}
+	results := make(chan result, len(cfg.UpstreamDoH))
 	for _, upstream := range cfg.UpstreamDoH {
-		resp, err := p.queryDoH(upstream, wire)
-		if err != nil {
-			lastErr = err
+		upstream := upstream
+		go func() {
+			resp, err := p.queryDoH(ctx, upstream, wire)
+			results <- result{resp: resp, err: err}
+		}()
+	}
+	var lastErr error
+	for range cfg.UpstreamDoH {
+		result := <-results
+		if result.err != nil {
+			lastErr = result.err
 			continue
 		}
-		resp.Id = r.Id
-		return resp, nil
+		result.resp.Id = r.Id
+		return result.resp, nil
 	}
 	return nil, lastErr
 }
 
-func (p *Proxy) queryDoH(upstream string, wire []byte) (*dns.Msg, error) {
-	req, err := http.NewRequest(http.MethodPost, upstream, bytes.NewReader(wire))
+func (p *Proxy) queryDoH(ctx context.Context, upstream string, wire []byte) (*dns.Msg, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream, bytes.NewReader(wire))
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +245,9 @@ func (p *Proxy) reply(w dns.ResponseWriter, r *dns.Msg, resp *dns.Msg) {
 		size := dns.MinMsgSize
 		if o := r.IsEdns0(); o != nil {
 			size = int(o.UDPSize())
+			if size < dns.MinMsgSize {
+				size = dns.MinMsgSize
+			}
 		}
 		resp.Truncate(size)
 	}

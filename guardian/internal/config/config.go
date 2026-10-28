@@ -3,14 +3,20 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // Window is a daily time range in local time, "HH:MM". Overnight ranges
@@ -46,9 +52,18 @@ func Default() Config {
 
 // Parse decodes and validates a config. Missing fields keep their defaults.
 func Parse(b []byte) (*Config, error) {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, errors.New("parse config: expected a JSON object")
+	}
 	c := Default()
-	if err := json.Unmarshal(b, &c); err != nil {
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("parse config: trailing data")
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -65,8 +80,17 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
+	host, port, err := net.SplitHostPort(c.ListenAddr)
+	if err != nil {
 		return fmt.Errorf("listen_addr: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("listen_addr: host must be a loopback IP literal")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return errors.New("listen_addr: port must be between 1 and 65535")
 	}
 	if len(c.UpstreamDoH) == 0 {
 		return errors.New("upstream_doh: need at least one upstream")
@@ -78,6 +102,9 @@ func (c *Config) validate() error {
 		}
 		if net.ParseIP(u.Hostname()) == nil {
 			return fmt.Errorf("upstream_doh %q: host must be an IP literal (the filter cannot resolve names through itself)", raw)
+		}
+		if u.User != nil || u.Fragment != "" {
+			return fmt.Errorf("upstream_doh %q: user information and fragments are not allowed", raw)
 		}
 	}
 	loc, err := time.LoadLocation(c.Timezone)
@@ -91,6 +118,23 @@ func (c *Config) validate() error {
 		}
 		if c.bedEnd, err = parseHM(c.Bedtime.End); err != nil {
 			return fmt.Errorf("bedtime.end: %w", err)
+		}
+		if c.bedStart == c.bedEnd {
+			return errors.New("bedtime.start and bedtime.end must differ")
+		}
+	}
+	for _, list := range []struct {
+		name    string
+		domains []string
+	}{{"blocked_domains", c.BlockedDomains}, {"allowed_domains", c.AllowedDomains}} {
+		for _, domain := range list.domains {
+			domain = strings.TrimSuffix(strings.TrimSpace(domain), ".")
+			if domain == "" {
+				return fmt.Errorf("%s: domains must not be empty", list.name)
+			}
+			if _, ok := dns.IsDomainName(domain); !ok {
+				return fmt.Errorf("%s: invalid domain %q", list.name, domain)
+			}
 		}
 	}
 	return nil
@@ -120,5 +164,41 @@ func (c *Config) InBedtime(now time.Time) bool {
 // Store holds the active config. Readers never block writers.
 type Store struct{ p atomic.Pointer[Config] }
 
-func (s *Store) Get() *Config  { return s.p.Load() }
-func (s *Store) Set(c *Config) { s.p.Store(c) }
+func (s *Store) Get() *Config {
+	c := s.p.Load()
+	if c == nil {
+		return nil
+	}
+	copy := *c
+	copy.UpstreamDoH = append([]string(nil), c.UpstreamDoH...)
+	copy.BlockedServices = append([]string(nil), c.BlockedServices...)
+	copy.BlockedDomains = append([]string(nil), c.BlockedDomains...)
+	copy.AllowedDomains = append([]string(nil), c.AllowedDomains...)
+	if c.Bedtime != nil {
+		window := *c.Bedtime
+		copy.Bedtime = &window
+	}
+	return &copy
+}
+
+// Set validates and copies c before publishing it. A bad update leaves the
+// previously active configuration untouched.
+func (s *Store) Set(c *Config) error {
+	if c == nil {
+		return errors.New("config must not be nil")
+	}
+	copy := *c
+	copy.UpstreamDoH = append([]string(nil), c.UpstreamDoH...)
+	copy.BlockedServices = append([]string(nil), c.BlockedServices...)
+	copy.BlockedDomains = append([]string(nil), c.BlockedDomains...)
+	copy.AllowedDomains = append([]string(nil), c.AllowedDomains...)
+	if c.Bedtime != nil {
+		window := *c.Bedtime
+		copy.Bedtime = &window
+	}
+	if err := copy.validate(); err != nil {
+		return err
+	}
+	s.p.Store(&copy)
+	return nil
+}
