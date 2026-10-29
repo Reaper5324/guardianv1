@@ -402,7 +402,7 @@ func SetServiceSecurityDescriptor(ctx context.Context, serviceName string) error
 	if serviceName != "GuardianDNS" {
 		return errors.New("refusing to change an unexpected service")
 	}
-	sddl := "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWRPWPDTLOCRRC;;;BA)"
+	sddl := "D:(A;;FA;;;SY)(A;;FA;;;BA)"
 	_, err := (execCommandRunner{}).Run(ctx, "sc.exe", []string{"sdset", serviceName, sddl}, nil)
 	if err != nil {
 		return fmt.Errorf("set service security descriptor: %w", err)

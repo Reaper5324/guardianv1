@@ -150,7 +150,15 @@ func installService(srcConfig string) (retErr error) {
 		defer s.Close()
 		return upgradeService(s, srcConfig)
 	} else if !errors.Is(err, syscall.Errno(1060)) {
-		return fmt.Errorf("check existing service: %w", err)
+		if aclErr := enforcer.SetServiceSecurityDescriptor(context.Background(), serviceName); aclErr != nil {
+			return fmt.Errorf("check existing service: %w (could not update its administrator permissions: %v; run this installer from an elevated administrator session)", err, aclErr)
+		}
+		s, openErr := m.OpenService(serviceName)
+		if openErr != nil {
+			return fmt.Errorf("reopen existing service after updating its administrator permissions: %w", openErr)
+		}
+		defer s.Close()
+		return upgradeService(s, srcConfig)
 	}
 
 	self, err := os.Executable()
@@ -583,7 +591,7 @@ func protectedServiceACL() (bool, error) {
 		dacl = dacl[:sacl]
 	}
 	dacl = strings.TrimSpace(dacl)
-	expected := "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWRPWPDTLOCRRC;;;BA)"
+	expected := "D:(A;;FA;;;SY)(A;;FA;;;BA)"
 	return dacl == expected, nil
 }
 
