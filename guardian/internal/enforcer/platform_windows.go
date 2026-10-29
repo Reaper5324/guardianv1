@@ -12,8 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf16"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 
 	"guardian/internal/config"
 )
@@ -23,6 +27,8 @@ type CommandRunner interface {
 }
 
 type execCommandRunner struct{}
+
+var setLastError = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetLastError")
 
 func (execCommandRunner) Run(ctx context.Context, executable string, args, env []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, executable, args...)
@@ -402,10 +408,78 @@ func SetServiceSecurityDescriptor(ctx context.Context, serviceName string) error
 	if serviceName != "GuardianDNS" {
 		return errors.New("refusing to change an unexpected service")
 	}
-	sddl := "D:(A;;FA;;;SY)(A;;FA;;;BA)"
-	_, err := (execCommandRunner{}).Run(ctx, "sc.exe", []string{"sdset", serviceName, sddl}, nil)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	const serviceACL = "D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
+	descriptor, err := windows.SecurityDescriptorFromString(serviceACL)
 	if err != nil {
-		return fmt.Errorf("set service security descriptor: %w", err)
+		return fmt.Errorf("build service security descriptor: %w", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read service DACL from descriptor: %w", err)
+	}
+	err = windows.SetNamedSecurityInfo(serviceName, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return fmt.Errorf("set service DACL: %w", err)
+	}
+	if err := takeOwnershipOfService(serviceName); err != nil {
+		return fmt.Errorf("take ownership of service to repair its DACL: %w", err)
+	}
+	if err := windows.SetNamedSecurityInfo(serviceName, windows.SE_SERVICE, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return fmt.Errorf("set service DACL after taking ownership: %w", err)
+	}
+	return nil
+}
+
+// An existing service may deny WRITE_DAC even to Administrators. Windows
+// permits its owner to replace the DACL, so enable the documented ownership
+// privilege only for the operation and restore the prior token state.
+func takeOwnershipOfService(serviceName string) (retErr error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("read installer account SID: %w", err)
+	}
+	privilegeName, err := windows.UTF16PtrFromString("SeTakeOwnershipPrivilege")
+	if err != nil {
+		return err
+	}
+	var privilege windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, privilegeName, &privilege); err != nil {
+		return fmt.Errorf("look up SeTakeOwnershipPrivilege: %w", err)
+	}
+	enable := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges: [1]windows.LUIDAndAttributes{{
+			Luid:       privilege,
+			Attributes: windows.SE_PRIVILEGE_ENABLED,
+		}},
+	}
+	var previous windows.Tokenprivileges
+	var returned uint32
+	setLastError.Call(0)
+	if err := windows.AdjustTokenPrivileges(token, false, &enable, uint32(unsafe.Sizeof(previous)), &previous, &returned); err != nil {
+		return fmt.Errorf("enable SeTakeOwnershipPrivilege: %w", err)
+	}
+	defer func() {
+		if err := windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore installer token privileges: %w", err))
+		}
+	}()
+	if err := windows.GetLastError(); err != nil {
+		return fmt.Errorf("enable SeTakeOwnershipPrivilege: %w", err)
+	}
+
+	if err := windows.SetNamedSecurityInfo(serviceName, windows.SE_SERVICE, windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+		return fmt.Errorf("set service owner to the elevated installer account: %w", err)
 	}
 	return nil
 }

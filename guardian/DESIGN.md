@@ -72,8 +72,10 @@ Guardian service (LocalSystem)
   filtering. Mobile data that does not traverse the laptop is outside scope.
 - The service DACL grants full service access only to SYSTEM and
   Administrators; administrators are trusted and outside the protection
-  boundary. Files under Program Files and ProgramData are ACL-restricted by
-  installation.
+  boundary. If a prior Guardian DACL prevents an elevated administrator from
+  opening the service for upgrade, the installer uses Windows service-object
+  security APIs and the ownership privilege to restore that DACL. Files under
+  Program Files and ProgramData are ACL-restricted by installation.
   `guardian status` checks common writable-user ACL entries; a real Windows
   standard-account test is still required to establish actual protection.
 - A scheduled task runs `guardian repair` as SYSTEM every minute. That command

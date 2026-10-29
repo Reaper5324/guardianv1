@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	_ "time/tzdata" // embed timezone data so Windows can resolve zones
 
 	"guardian/internal/app"
+	"guardian/internal/config"
 	"guardian/internal/dashboard"
 )
 
@@ -27,6 +29,8 @@ const usage = `usage:
   guardian status                         show local service and filter status
   guardian events [-n 50]                 show recent local events
   guardian repair                         restore enforcement and start the service
+  guardian version                        show the exact source revision in this build
+  guardian validate-config -config <file> validate the supplied config
   guardian keygen -private <file> -public <file>
                                           generate an Ed25519 config-signing keypair
   guardian sign -config <file> -key <file> -out <file>
@@ -76,6 +80,10 @@ func main() {
 		exitOnErr(showEvents(parseEventCount(args)))
 	case "repair":
 		exitOnErr(repairService())
+	case "version":
+		fmt.Println(buildVersion())
+	case "validate-config":
+		exitOnErr(validateConfig(args))
 	case "keygen":
 		exitOnErr(generateSigningKeypair(args))
 	case "sign":
@@ -84,6 +92,40 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+}
+
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "Guardian revision=unknown (build metadata unavailable)"
+	}
+	settings := make(map[string]string, len(info.Settings))
+	for _, setting := range info.Settings {
+		settings[setting.Key] = setting.Value
+	}
+	revision := settings["vcs.revision"]
+	if revision == "" {
+		revision = "unknown"
+	}
+	modified := settings["vcs.modified"]
+	if modified == "" {
+		modified = "unknown"
+	}
+	return fmt.Sprintf("Guardian revision=%s modified=%s go=%s", revision, modified, info.GoVersion)
+}
+
+func validateConfig(args []string) error {
+	fs := flag.NewFlagSet("validate-config", flag.ContinueOnError)
+	path := fs.String("config", "config.json", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return fmt.Errorf("config %s: %w", *path, err)
+	}
+	fmt.Printf("Configuration valid: listen=%s upstreams=%d\n", cfg.ListenAddr, len(cfg.UpstreamDoH))
+	return nil
 }
 
 func serveDashboard(ctx context.Context, cfgPath string, pauseOnError bool) error {

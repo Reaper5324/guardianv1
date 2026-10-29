@@ -166,9 +166,13 @@ binary and config:
 
 Omit `-TokenPath` if remote configuration is disabled and omit
 `-PublicKeyPath` if signatures are not required. The script checks elevation
-and required files, protects ProgramData, provisions supplied token/public-key
-files, and invokes `guardian.exe install`. The service installer preserves an
-already-installed config during upgrades.
+and required files, prints the executable's source revision, validates the
+supplied config before making system changes, protects ProgramData, provisions
+supplied token/public-key files, and invokes `guardian.exe install`. The
+service installer preserves an already-installed config and parent-password
+verifier during upgrades; it warns when the supplied config differs instead
+of silently replacing active settings. Run `guardian.exe version` to inspect
+the exact source revision embedded in a build.
 
 On a new installation, `guardian install` prompts for a parent password
 without echoing it to the console. Choose at least 12 characters and retain

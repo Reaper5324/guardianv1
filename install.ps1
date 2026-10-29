@@ -33,7 +33,22 @@ try {
     $GuardianExe = Assert-File $GuardianExe 'Guardian executable'
     $ConfigPath = Assert-File $ConfigPath 'Guardian configuration'
 
+    $buildInfo = & $GuardianExe version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not read Guardian build information (exit code $LASTEXITCODE)."
+    }
+    Write-Host "Guardian package: $buildInfo"
+
+    $validation = & $GuardianExe validate-config -config $ConfigPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Guardian rejected the supplied configuration (exit code $LASTEXITCODE)."
+    }
+    Write-Host $validation
+
     $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    if ($config.listen_addr -notmatch ':(53)$') {
+        throw 'System-wide installation requires listen_addr to use port 53.'
+    }
     if ($config.remote.enabled -and -not $TokenPath) {
         throw 'The config enables remote updates; provide -TokenPath for the read-only GitHub token.'
     }
@@ -48,6 +63,18 @@ try {
     }
 
     $dataDir = Join-Path $env:ProgramData 'Guardian'
+    $installedConfig = Join-Path $dataDir 'config.json'
+    if (Test-Path -LiteralPath $installedConfig -PathType Leaf) {
+        $suppliedHash = (Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
+        $installedHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
+        if ($suppliedHash -ne $installedHash) {
+            Write-Warning 'An existing installation was found. Upgrades preserve the installed config and parent password; the supplied config is validated but is not applied over existing settings.'
+        } else {
+            Write-Host 'The supplied config matches the installed config. The existing parent password will be preserved.'
+        }
+    } else {
+        Write-Host 'A new installation will prompt you to create a parent password; it is never included in the package.'
+    }
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
     if ($LASTEXITCODE -ne 0) {
