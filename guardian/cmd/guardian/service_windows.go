@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -151,7 +153,9 @@ func installService(srcConfig string) (retErr error) {
 		return upgradeService(s, srcConfig)
 	} else if !errors.Is(err, syscall.Errno(1060)) {
 		if aclErr := enforcer.SetServiceSecurityDescriptor(context.Background(), serviceName); aclErr != nil {
-			return fmt.Errorf("check existing service: %w (could not update its administrator permissions: %v; run this installer from an elevated administrator session)", err, aclErr)
+			if repairErr := repairServicePermissionsAsSystem(m); repairErr != nil {
+				return fmt.Errorf("check existing service: %w; direct ACL repair failed: %v; SYSTEM ACL repair failed: %w (run this installer from an elevated administrator session)", err, aclErr, repairErr)
+			}
 		}
 		s, openErr := m.OpenService(serviceName)
 		if openErr != nil {
@@ -271,6 +275,73 @@ func installService(srcConfig string) (retErr error) {
 	fmt.Printf("Installed and started %s.\n  binary: %s\n  config: %s\n  log:    %s\n",
 		serviceName, exe, dstCfg, filepath.Join(data, "guardian.log"))
 	return nil
+}
+
+func repairServicePermissionsAsSystem(m *mgr.Mgr) (retErr error) {
+	if m == nil {
+		return errors.New("service manager is not configured")
+	}
+	var taskID [8]byte
+	if _, err := rand.Read(taskID[:]); err != nil {
+		return fmt.Errorf("generate temporary task name: %w", err)
+	}
+	taskName := "GuardianServiceACLRepair-" + hex.EncodeToString(taskID[:])
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	scPath := filepath.Join(systemRoot, "System32", "sc.exe")
+	action := `"` + scPath + `" sdset GuardianDNS D:(A;;FA;;;SY)(A;;FA;;;BA)`
+	runTaskCommand := func(ctx context.Context, args ...string) error {
+		output, err := exec.CommandContext(ctx, "schtasks.exe", args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("schtasks.exe: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := runTaskCommand(ctx,
+		"/Create", "/TN", taskName, "/SC", "ONCE", "/ST", "23:59",
+		"/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", action, "/F",
+	); err != nil {
+		return fmt.Errorf("create temporary SYSTEM ACL-repair task: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		cleanupErr := runTaskCommand(cleanupCtx,
+			"/Delete", "/TN", taskName, "/F",
+		)
+		if cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary SYSTEM ACL-repair task: %w", cleanupErr))
+		}
+	}()
+	if err := runTaskCommand(ctx, "/Run", "/TN", taskName); err != nil {
+		return fmt.Errorf("run temporary SYSTEM ACL-repair task: %w", err)
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		service, err := m.OpenService(serviceName)
+		if err == nil {
+			_ = service.Close()
+			protected, checkErr := protectedServiceACL()
+			if checkErr != nil {
+				return fmt.Errorf("verify repaired service ACL: %w", checkErr)
+			}
+			if !protected {
+				return errors.New("SYSTEM task completed without installing the expected service ACL")
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for SYSTEM ACL repair: %w (last service open error: %v)", ctx.Err(), err)
+		case <-ticker.C:
+		}
+	}
 }
 
 func uninstallService() error {
