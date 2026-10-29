@@ -65,13 +65,7 @@ try {
     $dataDir = Join-Path $env:ProgramData 'Guardian'
     $installedConfig = Join-Path $dataDir 'config.json'
     if (Test-Path -LiteralPath $installedConfig -PathType Leaf) {
-        $suppliedHash = (Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
-        $installedHash = (Get-FileHash -LiteralPath $installedConfig -Algorithm SHA256).Hash
-        if ($suppliedHash -ne $installedHash) {
-            Write-Warning 'An existing installation was found. Upgrades preserve the installed config and parent password; the supplied config is validated but is not applied over existing settings.'
-        } else {
-            Write-Host 'The supplied config matches the installed config. The existing parent password will be preserved.'
-        }
+        Write-Host 'Existing installation detected. Its protected config and parent password will be preserved during upgrade.'
     } else {
         Write-Host 'A new installation will prompt you to create a parent password; it is never included in the package.'
     }

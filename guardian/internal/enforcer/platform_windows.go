@@ -443,7 +443,11 @@ func takeOwnershipOfService(serviceName string) (retErr error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	token := windows.GetCurrentProcessToken()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_PRIVILEGES, &token); err != nil {
+		return fmt.Errorf("open elevated installer token: %w", err)
+	}
+	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("read installer account SID: %w", err)
