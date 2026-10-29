@@ -47,6 +47,10 @@ func SaveLastKnownGood(path string, c *Config) error {
 		window := *c.Bedtime
 		validated.Bedtime = &window
 	}
+	if c.Remote != nil {
+		remote := *c.Remote
+		validated.Remote = &remote
+	}
 	if err := validated.validate(); err != nil {
 		return err
 	}

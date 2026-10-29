@@ -18,9 +18,12 @@ import (
 
 const usage = `usage:
   guardian [run] [-config config.json]    run in the console
-	guardian ui [-config config.json]       open the local configuration dashboard
+  guardian ui [-config config.json]       open the local configuration dashboard
   guardian install [-config config.json]  install and start the Windows service (Administrator)
   guardian uninstall                      stop and remove the service (Administrator)
+  guardian status                         show local service and filter status
+  guardian events [-n 50]                 show recent local events
+  guardian repair                         restore enforcement and start the service
 `
 
 func main() {
@@ -34,16 +37,18 @@ func main() {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd, args = args[0], args[1:]
 	}
-	cfgPath := parseConfig(args)
+	cfgPath := "config.json"
 
 	switch cmd {
 	case "run":
+		cfgPath = parseConfig(args)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := app.Run(ctx, cfgPath); err != nil {
 			log.Fatal(err)
 		}
 	case "ui":
+		cfgPath = parseConfig(args)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		fmt.Println("Guardian dashboard: http://127.0.0.1:8765")
@@ -51,13 +56,31 @@ func main() {
 			log.Fatal(err)
 		}
 	case "install":
+		cfgPath = parseConfig(args)
 		exitOnErr(installService(cfgPath))
 	case "uninstall":
 		exitOnErr(uninstallService())
+	case "status":
+		exitOnErr(showStatus())
+	case "events":
+		exitOnErr(showEvents(parseEventCount(args)))
+	case "repair":
+		exitOnErr(repairService())
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+}
+
+func parseEventCount(args []string) int {
+	fs := flag.NewFlagSet("events", flag.ExitOnError)
+	count := fs.Int("n", 50, "number of recent events to display")
+	_ = fs.Parse(args)
+	if *count < 1 || *count > 500 {
+		fmt.Fprintln(os.Stderr, "error: -n must be between 1 and 500")
+		os.Exit(2)
+	}
+	return *count
 }
 
 // parseConfig reads the -config flag from args.

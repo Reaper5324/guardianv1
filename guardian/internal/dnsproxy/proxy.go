@@ -5,6 +5,8 @@ package dnsproxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -23,14 +25,18 @@ type Proxy struct {
 	store   *config.Store
 	current atomic.Pointer[snapshot]
 	client  *http.Client
+	cache   *responseCache
 
-	// OnBlocked, if set, is called for every blocked query.
-	OnBlocked func(name, client string)
+	// OnBlocked, if set, is called for every blocked query. It must not block.
+	OnBlocked      func(name, client string)
+	OnBlockedCount func(category string)
+	OnListening    func()
 }
 
 type snapshot struct {
-	cfg     *config.Config
-	matcher *blocklist.Matcher
+	cfg            *config.Config
+	matcher        *blocklist.Matcher
+	cacheNamespace [sha256.Size]byte
 }
 
 func New(store *config.Store) (*Proxy, error) {
@@ -44,6 +50,7 @@ func New(store *config.Store) (*Proxy, error) {
 				Proxy: nil,
 			},
 		},
+		cache: newResponseCache(),
 	}
 	if err := p.Reload(); err != nil {
 		return nil, err
@@ -58,12 +65,51 @@ func (p *Proxy) Reload() error {
 	if c == nil {
 		return fmt.Errorf("no active config")
 	}
-	m, err := buildMatcher(c)
+	next, err := makeSnapshot(c)
 	if err != nil {
 		return err
 	}
-	p.current.Store(&snapshot{cfg: c, matcher: m})
+	p.current.Store(next)
+	p.cache.clear()
 	return nil
+}
+
+func (p *Proxy) CurrentConfig() *config.Config {
+	state := p.current.Load()
+	if state == nil {
+		return nil
+	}
+	return config.Clone(state.cfg)
+}
+
+// ApplyConfig validates all derived filtering state before persistence, then
+// publishes config and matcher together for DNS readers.
+func (p *Proxy) ApplyConfig(c *config.Config, commit func() error) error {
+	if c == nil {
+		return fmt.Errorf("config must not be nil")
+	}
+	next, err := makeSnapshot(config.Clone(c))
+	if err != nil {
+		return err
+	}
+	if err := p.store.Update(c, commit); err != nil {
+		return err
+	}
+	p.current.Store(next)
+	p.cache.clear()
+	return nil
+}
+
+func makeSnapshot(c *config.Config) (*snapshot, error) {
+	m, err := buildMatcher(c)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("encode config snapshot: %w", err)
+	}
+	return &snapshot{cfg: c, matcher: m, cacheNamespace: sha256.Sum256(encoded)}, nil
 }
 
 func buildMatcher(c *config.Config) (*blocklist.Matcher, error) {
@@ -87,29 +133,53 @@ func (p *Proxy) Run(ctx context.Context) error {
 	if state == nil {
 		return fmt.Errorf("no active config")
 	}
-	addr := state.cfg.ListenAddr
+	_, port, err := net.SplitHostPort(state.cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("invalid configured listen address: %w", err)
+	}
 	mux := dns.NewServeMux()
 	mux.Handle(".", p)
 
-	packetConn, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return fmt.Errorf("listen UDP %s: %w", addr, err)
-	}
-	tcpListener, err := net.Listen("tcp", addr)
-	if err != nil {
-		packetConn.Close()
-		return fmt.Errorf("listen TCP %s: %w", addr, err)
-	}
-	udp := &dns.Server{PacketConn: packetConn, Handler: mux}
-	tcp := &dns.Server{Listener: tcpListener, Handler: mux}
+	listeners := make([]dnsListener, 0, 4)
+	for _, family := range []struct {
+		network string
+		ip      string
+	}{
+		{network: "4", ip: "127.0.0.1"},
+		{network: "6", ip: "::1"},
+	} {
+		addr := net.JoinHostPort(family.ip, port)
+		packetConn, err := net.ListenPacket("udp"+family.network, addr)
+		if err != nil {
+			closeListeners(listeners)
+			return fmt.Errorf("listen UDP %s: %w", addr, err)
+		}
+		listeners = append(listeners, dnsListener{
+			server: &dns.Server{PacketConn: packetConn, Handler: mux},
+			close:  packetConn.Close,
+		})
 
-	started := make(chan struct{}, 2)
-	udp.NotifyStartedFunc = func() { started <- struct{}{} }
-	tcp.NotifyStartedFunc = func() { started <- struct{}{} }
+		tcpListener, err := net.Listen("tcp"+family.network, addr)
+		if err != nil {
+			closeListeners(listeners)
+			return fmt.Errorf("listen TCP %s: %w", addr, err)
+		}
+		listeners = append(listeners, dnsListener{
+			server: &dns.Server{Listener: tcpListener, Handler: mux},
+			close:  tcpListener.Close,
+		})
+	}
+
+	started := make(chan struct{}, len(listeners))
+	for i := range listeners {
+		listeners[i].server.NotifyStartedFunc = func() { started <- struct{}{} }
+	}
 	startedEvents := (<-chan struct{})(started)
-	errC := make(chan error, 2)
-	go func() { errC <- udp.ActivateAndServe() }()
-	go func() { errC <- tcp.ActivateAndServe() }()
+	errC := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		server := listener.server
+		go func() { errC <- server.ActivateAndServe() }()
+	}
 
 	completed := 0
 	startedCount := 0
@@ -123,10 +193,13 @@ func (p *Proxy) Run(ctx context.Context) error {
 			stopping = true
 		case <-startedEvents:
 			startedCount++
-			if startedCount == 2 {
-				// Both listeners are serving; wait only for cancellation or
+			if startedCount == len(listeners) {
+				// Every listener is serving; wait only for cancellation or
 				// an unexpected listener exit from this point onward.
 				startedEvents = nil
+				if p.OnListening != nil {
+					p.OnListening()
+				}
 			}
 		case serverErr := <-errC:
 			completed++
@@ -139,16 +212,26 @@ func (p *Proxy) Run(ctx context.Context) error {
 			stopping = true
 		}
 	}
-	_ = udp.Shutdown()
-	_ = tcp.Shutdown()
-	// Close the underlying sockets as well: Shutdown can race with a server
-	// goroutine that has not yet entered ActivateAndServe.
-	_ = packetConn.Close()
-	_ = tcpListener.Close()
-	for ; completed < 2; completed++ {
+	for _, listener := range listeners {
+		_ = listener.server.Shutdown()
+		// Shutdown may race with an ActivateAndServe call not yet running.
+		_ = listener.close()
+	}
+	for ; completed < len(listeners); completed++ {
 		<-errC
 	}
 	return runErr
+}
+
+type dnsListener struct {
+	server *dns.Server
+	close  func() error
+}
+
+func closeListeners(listeners []dnsListener) {
+	for _, listener := range listeners {
+		_ = listener.close()
+	}
 }
 
 // ServeDNS implements dns.Handler.
@@ -165,7 +248,11 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 	cfg := state.cfg
 
-	if p.shouldBlock(cfg, state.matcher, q.Name) {
+	category := p.blockCategory(cfg, state.matcher, q.Name, time.Now())
+	if category != "" {
+		if p.OnBlockedCount != nil {
+			p.OnBlockedCount(category)
+		}
 		if p.OnBlocked != nil {
 			p.OnBlocked(q.Name, w.RemoteAddr().String())
 		}
@@ -173,24 +260,77 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	key, keyErr := makeCacheKey(state.cacheNamespace, r)
+	if keyErr == nil {
+		if cached, ok := p.cache.get(key, time.Now()); ok {
+			cached.Id = r.Id
+			p.reply(w, r, cached)
+			return
+		}
+	}
 	resp, err := p.forward(cfg, r)
 	if err != nil {
-		log.Printf("upstream failure for %s: %v", q.Name, err)
 		p.reply(w, r, new(dns.Msg).SetRcode(r, dns.RcodeServerFailure)) // fail closed
 		return
+	}
+	if keyErr == nil {
+		p.cache.put(key, resp, time.Now())
 	}
 	p.reply(w, r, resp)
 }
 
-func (p *Proxy) shouldBlock(cfg *config.Config, m *blocklist.Matcher, name string) bool {
-	if m.Blocked(name) {
-		return true
+func makeCacheKey(namespace [sha256.Size]byte, query *dns.Msg) (string, error) {
+	canonical := query.Copy()
+	canonical.Id = 0
+	wire, err := canonical.Pack()
+	if err != nil {
+		return "", err
 	}
-	return cfg.InBedtime(time.Now()) && !m.Allowed(name)
+	return string(namespace[:]) + string(wire), nil
+}
+
+func (p *Proxy) blockCategory(cfg *config.Config, m *blocklist.Matcher, name string, now time.Time) string {
+	if m.Blocked(name) {
+		for _, service := range cfg.BlockedServices {
+			domains, ok := blocklist.Preset(service)
+			if ok && blocklist.New(domains, nil).Blocked(name) {
+				return service
+			}
+		}
+		if cfg.BlockDoHProviders && blocklist.New(blocklist.DoHProviders, nil).Blocked(name) {
+			return "doh-provider"
+		}
+		return "custom"
+	}
+	if cfg.InBedtime(now) && !m.Allowed(name) {
+		return "bedtime"
+	}
+	return ""
+}
+
+func (p *Proxy) ProbeUpstreams(ctx context.Context) error {
+	state := p.current.Load()
+	if state == nil {
+		return fmt.Errorf("no active config")
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("guardian-health.invalid.", dns.TypeA)
+	response, err := p.forwardContext(ctx, state.cfg, query)
+	if err != nil {
+		return err
+	}
+	if response.Rcode != dns.RcodeSuccess {
+		return fmt.Errorf("upstream returned DNS rcode %s", dns.RcodeToString[response.Rcode])
+	}
+	return nil
 }
 
 // forward sends the query to each upstream in order over DoH (RFC 8484).
 func (p *Proxy) forward(cfg *config.Config, r *dns.Msg) (*dns.Msg, error) {
+	return p.forwardContext(context.Background(), cfg, r)
+}
+
+func (p *Proxy) forwardContext(parent context.Context, cfg *config.Config, r *dns.Msg) (*dns.Msg, error) {
 	wire, err := r.Pack()
 	if err != nil {
 		return nil, err
@@ -198,7 +338,7 @@ func (p *Proxy) forward(cfg *config.Config, r *dns.Msg) (*dns.Msg, error) {
 	if len(cfg.UpstreamDoH) == 0 {
 		return nil, fmt.Errorf("no DoH upstreams configured")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, 1800*time.Millisecond)
 	defer cancel()
 	type result struct {
 		resp *dns.Msg

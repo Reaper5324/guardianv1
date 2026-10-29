@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Guardian baseline tests",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/c",
+				"git status --short && cd /d guardian && go test ./..."
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

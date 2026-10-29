@@ -126,3 +126,9 @@ func TestParseRejectsTrailingJSON(t *testing.T) {
 		t.Fatal("Parse accepted trailing JSON")
 	}
 }
+
+func TestParseAcceptsIPv6LoopbackListener(t *testing.T) {
+	if _, err := Parse([]byte(`{"listen_addr":"[::1]:53"}`)); err != nil {
+		t.Fatalf("Parse rejected IPv6 loopback listener: %v", err)
+	}
+}

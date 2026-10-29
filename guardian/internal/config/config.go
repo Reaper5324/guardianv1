@@ -25,6 +25,15 @@ type Window struct {
 	End   string `json:"end"`
 }
 
+type RemoteSource struct {
+	Enabled          bool   `json:"enabled"`
+	Owner            string `json:"owner"`
+	Repository       string `json:"repository"`
+	Branch           string `json:"branch"`
+	Path             string `json:"path"`
+	RequireSignature bool   `json:"require_signature,omitempty"`
+}
+
 type Config struct {
 	Version           uint64   `json:"version,omitempty"`
 	ListenAddr        string   `json:"listen_addr"`
@@ -35,6 +44,7 @@ type Config struct {
 	BlockDoHProviders bool     `json:"block_doh_providers"`
 	Bedtime           *Window  `json:"bedtime,omitempty"`
 	Timezone          string   `json:"timezone"`
+	Remote            *RemoteSource `json:"remote,omitempty"`
 
 	loc              *time.Location
 	bedStart, bedEnd int // minutes since midnight
@@ -112,6 +122,24 @@ func (c *Config) validate() error {
 		return fmt.Errorf("timezone %q: %w", c.Timezone, err)
 	}
 	c.loc = loc
+	if c.Remote != nil {
+		if c.Remote.Enabled {
+			if !validRepositoryPart(c.Remote.Owner) || !validRepositoryPart(c.Remote.Repository) {
+				return errors.New("remote: owner and repository must be valid GitHub identifiers")
+			}
+			if c.Remote.Branch == "" {
+				c.Remote.Branch = "main"
+			}
+			if !validRemotePath(c.Remote.Branch) {
+				return errors.New("remote: branch contains invalid characters")
+			}
+			if !validRemotePath(c.Remote.Path) {
+				return errors.New("remote: path must be a relative repository path without traversal")
+			}
+		} else if c.Remote.RequireSignature {
+			return errors.New("remote: require_signature needs remote.enabled")
+		}
+	}
 	if c.Bedtime != nil {
 		if c.bedStart, err = parseHM(c.Bedtime.Start); err != nil {
 			return fmt.Errorf("bedtime.start: %w", err)
@@ -138,6 +166,31 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+func validRepositoryPart(value string) bool {
+	if value == "" || len(value) > 100 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+			(ch < '0' || ch > '9') && ch != '-' && ch != '_' && ch != '.' {
+			return false
+		}
+	}
+	return value != "." && value != ".."
+}
+
+func validRemotePath(value string) bool {
+	if value == "" || len(value) > 512 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func validDomainName(domain string) bool {
@@ -190,33 +243,23 @@ func (s *Store) Get() *Config {
 	if c == nil {
 		return nil
 	}
-	copy := *c
-	copy.UpstreamDoH = append([]string(nil), c.UpstreamDoH...)
-	copy.BlockedServices = append([]string(nil), c.BlockedServices...)
-	copy.BlockedDomains = append([]string(nil), c.BlockedDomains...)
-	copy.AllowedDomains = append([]string(nil), c.AllowedDomains...)
-	if c.Bedtime != nil {
-		window := *c.Bedtime
-		copy.Bedtime = &window
-	}
+	copy := cloneConfig(c)
 	return &copy
 }
 
 // Set validates and copies c before publishing it. A bad update leaves the
 // previously active configuration untouched.
 func (s *Store) Set(c *Config) error {
+	return s.Update(c, nil)
+}
+
+// Update validates c, runs commit while writers are serialized, and publishes
+// the new config only if commit succeeds.
+func (s *Store) Update(c *Config, commit func() error) error {
 	if c == nil {
 		return errors.New("config must not be nil")
 	}
-	copy := *c
-	copy.UpstreamDoH = append([]string(nil), c.UpstreamDoH...)
-	copy.BlockedServices = append([]string(nil), c.BlockedServices...)
-	copy.BlockedDomains = append([]string(nil), c.BlockedDomains...)
-	copy.AllowedDomains = append([]string(nil), c.AllowedDomains...)
-	if c.Bedtime != nil {
-		window := *c.Bedtime
-		copy.Bedtime = &window
-	}
+	copy := cloneConfig(c)
 	if err := copy.validate(); err != nil {
 		return err
 	}
@@ -225,6 +268,36 @@ func (s *Store) Set(c *Config) error {
 	if active := s.p.Load(); active != nil && copy.Version < active.Version {
 		return fmt.Errorf("config version downgrade: active version %d, received %d", active.Version, copy.Version)
 	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
+	}
 	s.p.Store(&copy)
 	return nil
+}
+
+func cloneConfig(c *Config) Config {
+	copy := *c
+	copy.UpstreamDoH = append([]string(nil), c.UpstreamDoH...)
+	copy.BlockedServices = append([]string(nil), c.BlockedServices...)
+	copy.BlockedDomains = append([]string(nil), c.BlockedDomains...)
+	copy.AllowedDomains = append([]string(nil), c.AllowedDomains...)
+	if c.Bedtime != nil {
+		window := *c.Bedtime
+		copy.Bedtime = &window
+	}
+	if c.Remote != nil {
+		remote := *c.Remote
+		copy.Remote = &remote
+	}
+	return copy
+}
+
+func Clone(c *Config) *Config {
+	if c == nil {
+		return nil
+	}
+	copy := cloneConfig(c)
+	return &copy
 }

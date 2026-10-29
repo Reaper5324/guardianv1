@@ -21,14 +21,16 @@ type responseWriter struct {
 	addr net.Addr
 }
 
-func (w *responseWriter) LocalAddr() net.Addr        { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53} }
-func (w *responseWriter) RemoteAddr() net.Addr       { return w.addr }
-func (w *responseWriter) WriteMsg(m *dns.Msg) error  { w.msg = m; return nil }
+func (w *responseWriter) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53}
+}
+func (w *responseWriter) RemoteAddr() net.Addr        { return w.addr }
+func (w *responseWriter) WriteMsg(m *dns.Msg) error   { w.msg = m; return nil }
 func (w *responseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (w *responseWriter) Close() error               { return nil }
-func (w *responseWriter) TsigStatus() error          { return nil }
-func (w *responseWriter) TsigTimersOnly(bool)        {}
-func (w *responseWriter) Hijack()                   {}
+func (w *responseWriter) Close() error                { return nil }
+func (w *responseWriter) TsigStatus() error           { return nil }
+func (w *responseWriter) TsigTimersOnly(bool)         {}
+func (w *responseWriter) Hijack()                     {}
 
 func makeProxy(t *testing.T, upstream string, client *http.Client, blocked, allowed []string) *Proxy {
 	t.Helper()
@@ -184,8 +186,18 @@ func TestRunWaitsUntilContextCancelled(t *testing.T) {
 	}
 	p := makeProxyForAddr(t, net.JoinHostPort("127.0.0.1", port))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listening := make(chan struct{})
+	p.OnListening = func() { close(listening) }
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
+	select {
+	case <-listening:
+	case runErr := <-done:
+		t.Fatalf("proxy failed before listening: %v", runErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not start listening")
+	}
 
 	query := new(dns.Msg)
 	query.SetQuestion("blocked.test.", dns.TypeA)
