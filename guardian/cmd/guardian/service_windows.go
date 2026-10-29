@@ -255,9 +255,6 @@ func installService(srcConfig string) (retErr error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := waitForDNSListeners(ctx); err != nil {
-		return fmt.Errorf("wait for DNS service readiness: %w", err)
-	}
 	if err := waitForServiceDashboard(ctx, s); err != nil {
 		return fmt.Errorf("verify installed service configuration: %w", err)
 	}
@@ -709,29 +706,6 @@ func stopService(service *mgr.Service) error {
 	return fmt.Errorf("service did not fully stop within 30 seconds (state=%d, process id=%d)", status.State, status.ProcessId)
 }
 
-func waitForDNSListeners(ctx context.Context) error {
-	for _, address := range []string{"127.0.0.1:53", "[::1]:53"} {
-		ready := false
-		for !ready {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			conn, err := net.DialTimeout("tcp", address, time.Second)
-			if err == nil {
-				conn.Close()
-				ready = true
-				continue
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(300 * time.Millisecond):
-			}
-		}
-	}
-	return nil
-}
-
 func waitForServiceDashboard(ctx context.Context, service *mgr.Service) error {
 	if service == nil {
 		return errors.New("Guardian service handle is required")
@@ -912,9 +886,6 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	serviceHandled = true
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := waitForDNSListeners(ctx); err != nil {
-		return fmt.Errorf("wait for upgraded service: %w", err)
-	}
 	if err := waitForServiceDashboard(ctx, service); err != nil {
 		return fmt.Errorf("verify upgraded service configuration: %w", err)
 	}
