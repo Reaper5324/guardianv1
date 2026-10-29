@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-func dataDir() string {
+func DataDir() string {
 	base := os.Getenv("ProgramData")
 	if base == "" {
 		base = `C:\ProgramData`
