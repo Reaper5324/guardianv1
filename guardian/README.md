@@ -44,6 +44,7 @@ Configuration fields:
 
 | Field | Meaning |
 |---|---|
+| `version` | Monotonically increasing configuration revision. Older revisions are rejected by the running config store; omitted versions are treated as `0` for compatibility. |
 | `listen_addr` | Loopback IP and port for the UDP and TCP DNS listeners. Use `127.0.0.1:53` for standard Windows DNS clients. |
 | `upstream_doh` | One or more HTTPS DoH URLs. Each URL must use an IP-literal host (not a hostname), for example `https://1.1.1.1/dns-query`. Guardian races configured upstreams and uses the first successful response, within a shared short deadline. |
 | `blocked_services` | Presets currently available: `instagram`, `tiktok`, and `snapchat`. |
@@ -53,7 +54,7 @@ Configuration fields:
 | `bedtime` | Optional daily `start` and `end` values in 24-hour `HH:MM` format. Omit the field or set it to `null` to disable bedtime. Start and end must differ. |
 | `timezone` | IANA time-zone name used to evaluate bedtime, such as `Africa/Johannesburg` or `America/New_York`. |
 
-Unknown JSON fields, invalid domain rules, non-loopback listen addresses, hostnames in DoH upstream URLs, and invalid bedtime settings are rejected. Guardian loads configuration at startup; editing a file does not hot-reload the running process or service. Restart it after changing the configuration. The service installer keeps an already-existing installed config instead of replacing it with the supplied file.
+Unknown JSON fields, invalid domain rules, non-loopback listen addresses, hostnames in DoH upstream URLs, and invalid bedtime settings are rejected. At startup, Guardian saves a validated config as `config.json.last-good.json`. If the primary file is invalid, missing, or older than the saved version, it uses the last-known-good copy instead. Editing a file does not hot-reload the running process or service. Restart it after changing the configuration. The service installer keeps an already-existing installed config instead of replacing it with the supplied file.
 
 ## Run from source
 
@@ -73,6 +74,16 @@ dig @127.0.0.1 -p 5353 instagram.com
 ```
 
 The first query should be forwarded; a blocked name should return `NXDOMAIN`. To test bedtime, temporarily configure a window that includes the current time and query a non-allowlisted name.
+
+## Local dashboard
+
+The executable includes a responsive, read-only configuration dashboard; it has no external assets or runtime web dependencies. Start it with:
+
+```powershell
+.\guardian.exe ui -config .\config.json
+```
+
+Open `http://127.0.0.1:8765` on the same computer. The dashboard shows the loaded configuration version, configured service profiles, rule counts, listener, upstream count, and bedtime schedule. It binds only to IPv4 loopback, exposes counts rather than custom domain lists, and does not change settings. It is a configuration view, not a live check that the Windows service or network enforcement is healthy. Stop it with Ctrl+C.
 
 ## Install as a Windows service
 

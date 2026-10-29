@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +26,7 @@ type Window struct {
 }
 
 type Config struct {
+	Version           uint64   `json:"version,omitempty"`
 	ListenAddr        string   `json:"listen_addr"`
 	UpstreamDoH       []string `json:"upstream_doh"`
 	BlockedServices   []string `json:"blocked_services"`
@@ -178,7 +180,10 @@ func (c *Config) InBedtime(now time.Time) bool {
 }
 
 // Store holds the active config. Readers never block writers.
-type Store struct{ p atomic.Pointer[Config] }
+type Store struct {
+	mu sync.Mutex
+	p  atomic.Pointer[Config]
+}
 
 func (s *Store) Get() *Config {
 	c := s.p.Load()
@@ -214,6 +219,11 @@ func (s *Store) Set(c *Config) error {
 	}
 	if err := copy.validate(); err != nil {
 		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if active := s.p.Load(); active != nil && copy.Version < active.Version {
+		return fmt.Errorf("config version downgrade: active version %d, received %d", active.Version, copy.Version)
 	}
 	s.p.Store(&copy)
 	return nil

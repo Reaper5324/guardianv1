@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Guardian · Family safety</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Application navigation">
+      <a class="brand" href="/" aria-label="Guardian home"><span class="brand-mark">G</span><span>guardian</span></a>
+      <div class="rail-label">WORKSPACE</div>
+      <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span> Overview</a>
+      <a class="nav-item" href="#protection"><span class="nav-icon">◇</span> Protection</a>
+      <a class="nav-item" href="#schedule"><span class="nav-icon">◷</span> Schedule</a>
+      <div class="rail-foot"><span class="rail-dot"></span><span>Local dashboard</span></div>
+    </aside>
+
+    <main class="main" id="overview">
+      <header class="topbar">
+        <div class="breadcrumbs">Guardian <span>/</span> Overview</div>
+        <div class="local-badge"><span class="live-dot"></span> THIS DEVICE</div>
+      </header>
+
+      <section class="welcome">
+        <div>
+          <div class="eyebrow">FAMILY SAFETY CONSOLE</div>
+          <h1>A calmer corner<br>of the internet.</h1>
+          <p class="lead">A clear view of Guardian’s filtering configuration on this device.</p>
+        </div>
+        <div class="welcome-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orb-core"><span>G</span></div><div class="spark spark-one">✳</div><div class="spark spark-two">✦</div></div>
+      </section>
+
+      <section class="notice" id="notice" hidden role="status"></section>
+      <section class="stats" aria-label="Configuration summary">
+        <article class="stat-card"><div class="stat-top"><span>Configuration</span><span class="stat-symbol mint">✓</span></div><div class="stat-value" id="version">—</div><div class="stat-caption">Version</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Protected services</span><span class="stat-symbol lavender">◇</span></div><div class="stat-value" id="service-count">—</div><div class="stat-caption">Built-in rule sets</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Custom rules</span><span class="stat-symbol peach">⌁</span></div><div class="stat-value" id="rule-count">—</div><div class="stat-caption">Block and allow entries</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Secure DNS</span><span class="stat-symbol blue">◎</span></div><div class="stat-value small-value" id="doh-status">—</div><div class="stat-caption">Provider hostname filtering</div></article>
+      </section>
+
+      <div class="content-grid">
+        <section class="panel" id="protection">
+          <div class="panel-heading"><div><div class="eyebrow">FILTERING</div><h2>Protection profile</h2></div><span class="pill" id="config-state">Loading</span></div>
+          <p class="panel-copy">Guardian checks DNS requests against the selected service profiles and custom rules before forwarding permitted lookups over encrypted DNS.</p>
+          <div class="service-list" id="services" aria-live="polite"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+          <div class="panel-divider"></div>
+          <div class="detail-row"><span>DNS listener</span><strong id="listener">—</strong></div>
+          <div class="detail-row"><span>Encrypted upstreams</span><strong id="upstream-count">—</strong></div>
+        </section>
+
+        <section class="panel schedule-panel" id="schedule">
+          <div class="panel-heading"><div><div class="eyebrow">DAILY ROUTINE</div><h2>Bedtime schedule</h2></div><span class="clock-icon">◷</span></div>
+          <div class="schedule-state"><span class="schedule-dot" id="bedtime-dot"></span><span id="bedtime-state">Checking schedule…</span></div>
+          <div class="time-card"><div><span class="time-label">STARTS</span><strong id="bedtime-start">—</strong></div><span class="time-arrow">→</span><div><span class="time-label">ENDS</span><strong id="bedtime-end">—</strong></div></div>
+          <div class="detail-row"><span>Time zone</span><strong id="timezone">—</strong></div>
+          <p class="fine-print" id="schedule-note">When enabled, non-allowlisted names are blocked during this window.</p>
+        </section>
+      </div>
+
+      <footer class="footer"><div><span class="footer-mark">G</span> Guardian <span class="footer-sep">·</span> Private by design</div><div id="updated">Reading local configuration…</div></footer>
+      <p class="disclaimer">This dashboard displays configuration only; it does not confirm that the Windows service is running or that network-wide enforcement is active.</p>
+    </main>
+  </div>
+  <noscript><div class="noscript">Enable JavaScript to view the local configuration dashboard.</div></noscript>
+</body>
+</html>

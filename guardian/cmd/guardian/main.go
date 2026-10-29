@@ -13,10 +13,12 @@ import (
 	_ "time/tzdata" // embed timezone data so Windows can resolve zones
 
 	"guardian/internal/app"
+	"guardian/internal/dashboard"
 )
 
 const usage = `usage:
   guardian [run] [-config config.json]    run in the console
+	guardian ui [-config config.json]       open the local configuration dashboard
   guardian install [-config config.json]  install and start the Windows service (Administrator)
   guardian uninstall                      stop and remove the service (Administrator)
 `
@@ -39,6 +41,13 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := app.Run(ctx, cfgPath); err != nil {
+			log.Fatal(err)
+		}
+	case "ui":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		fmt.Println("Guardian dashboard: http://127.0.0.1:8765")
+		if err := dashboard.Run(ctx, cfgPath); err != nil {
 			log.Fatal(err)
 		}
 	case "install":

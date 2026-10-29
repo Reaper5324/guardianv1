@@ -104,6 +104,23 @@ func TestStoreBadUpdatePreservesGoodConfig(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsVersionDowngrade(t *testing.T) {
+	store := &Store{}
+	current := testConfig(t, `null`)
+	current.Version = 8
+	if err := store.Set(current); err != nil {
+		t.Fatal(err)
+	}
+	older := testConfig(t, `null`)
+	older.Version = 7
+	if err := store.Set(older); err == nil {
+		t.Fatal("Set accepted a lower config version")
+	}
+	if got := store.Get().Version; got != 8 {
+		t.Fatalf("active version = %d, want 8", got)
+	}
+}
+
 func TestParseRejectsTrailingJSON(t *testing.T) {
 	if _, err := Parse([]byte(`{} {}`)); err == nil {
 		t.Fatal("Parse accepted trailing JSON")

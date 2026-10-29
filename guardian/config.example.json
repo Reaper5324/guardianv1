@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "listen_addr": "127.0.0.1:5353",
   "upstream_doh": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"],
   "blocked_services": ["instagram", "tiktok", "snapchat"],

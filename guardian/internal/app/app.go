@@ -14,9 +14,12 @@ import (
 // Run loads the config and serves DNS until ctx is cancelled. It returns nil
 // on a clean shutdown and an error if startup or serving fails.
 func Run(ctx context.Context, cfgPath string) error {
-	cfg, err := config.Load(cfgPath)
+	cfg, usedFallback, err := config.LoadWithFallback(cfgPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+	if usedFallback {
+		log.Printf("primary config unavailable or older; using last-known-good config")
 	}
 	store := &config.Store{}
 	if err := store.Set(cfg); err != nil {
