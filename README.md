@@ -172,7 +172,10 @@ supplied token/public-key files, and invokes `guardian.exe install`. The
 service installer preserves an already-installed config and parent-password
 verifier during upgrades; it warns when the supplied config differs instead
 of silently replacing active settings. Run `guardian.exe version` to inspect
-the exact source revision embedded in a build.
+the exact source revision embedded in a build. After starting or upgrading the
+service, the installer verifies its loaded configuration and effective DNS,
+adapter, and firewall state through the service's local dashboard; it does not
+try to read the SYSTEM-protected installed config as the administrator.
 
 On a new installation, `guardian install` prompts for a parent password
 without echoing it to the console. Choose at least 12 characters and retain

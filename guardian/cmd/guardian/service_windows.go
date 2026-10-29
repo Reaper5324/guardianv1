@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,12 +259,8 @@ func installService(srcConfig string) (retErr error) {
 	if err := waitForDNSListeners(ctx); err != nil {
 		return fmt.Errorf("wait for DNS service readiness: %w", err)
 	}
-	installedConfig, _, err := config.LoadWithFallback(dstCfg)
-	if err != nil {
-		return fmt.Errorf("installed config: %w", err)
-	}
-	if err := enforcer.Repair(ctx, data, installedConfig, nil); err != nil {
-		return fmt.Errorf("apply enforcement: %w", err)
+	if err := waitForServiceDashboard(ctx, s); err != nil {
+		return fmt.Errorf("verify installed service configuration: %w", err)
 	}
 	if err := enforcer.InstallWatchdog(ctx, exe); err != nil {
 		return fmt.Errorf("service is installed and enforcement is active, but watchdog installation failed: %w", err)
@@ -711,6 +709,122 @@ func waitForDNSListeners(ctx context.Context) error {
 	return nil
 }
 
+func waitForServiceDashboard(ctx context.Context, service *mgr.Service) error {
+	if service == nil {
+		return errors.New("Guardian service handle is required")
+	}
+	const statusURL = "http://127.0.0.1:8765/api/status"
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	var lastErr error
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		serviceStatus, err := service.Query()
+		if err != nil {
+			return fmt.Errorf("query Guardian service state: %w", err)
+		}
+		if serviceStatus.State != svc.Running {
+			lastErr = fmt.Errorf("Guardian service state is %d, not running", serviceStatus.State)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%w (last service status: %v)", ctx.Err(), lastErr)
+			case <-ticker.C:
+			}
+			continue
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		if err != nil {
+			return fmt.Errorf("create dashboard status request: %w", err)
+		}
+		response, requestErr := client.Do(request)
+		if requestErr == nil {
+			if response.StatusCode == http.StatusOK {
+				body, readErr := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+				_ = response.Body.Close()
+				if readErr != nil {
+					return fmt.Errorf("read dashboard status: %w", readErr)
+				}
+				ready, readinessReason, readinessErr := serviceDashboardReady(body)
+				if readinessErr != nil {
+					return fmt.Errorf("decode dashboard status: %w", readinessErr)
+				}
+				if ready {
+					return nil
+				}
+				lastErr = errors.New(readinessReason)
+			} else {
+				body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+				_ = response.Body.Close()
+				if readErr != nil {
+					lastErr = fmt.Errorf("read dashboard status response: %w", readErr)
+				} else {
+					lastErr = fmt.Errorf("dashboard status returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+				}
+			}
+		} else {
+			lastErr = requestErr
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("%w (last dashboard status error: %v)", ctx.Err(), lastErr)
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func serviceDashboardReady(body []byte) (bool, string, error) {
+	var current struct {
+		ListenAddr        string `json:"listen_addr"`
+		DNSListenersReady bool   `json:"dns_listeners_ready"`
+		FirewallRuleCount int    `json:"firewall_rule_count"`
+		CanRepair         bool   `json:"can_repair"`
+		Adapters          []struct {
+			Name    string   `json:"name"`
+			Up      bool     `json:"up"`
+			IPv4DNS []string `json:"ipv4_dns"`
+			IPv6DNS []string `json:"ipv6_dns"`
+		} `json:"adapters"`
+	}
+	if err := json.Unmarshal(body, &current); err != nil {
+		return false, "", err
+	}
+	_, port, addrErr := net.SplitHostPort(current.ListenAddr)
+	var reasons []string
+	if addrErr != nil || port != "53" {
+		reasons = append(reasons, fmt.Sprintf("configured DNS address %q is not on port 53", current.ListenAddr))
+	}
+	if !current.DNSListenersReady {
+		reasons = append(reasons, "DNS listeners are not ready")
+	}
+	if !current.CanRepair {
+		reasons = append(reasons, "service enforcement controls are unavailable")
+	}
+	if current.FirewallRuleCount == 0 {
+		reasons = append(reasons, "no Guardian firewall rules were found")
+	}
+	for _, adapter := range current.Adapters {
+		if !adapter.Up {
+			continue
+		}
+		if len(adapter.IPv4DNS) != 1 || adapter.IPv4DNS[0] != "127.0.0.1" ||
+			len(adapter.IPv6DNS) != 1 || adapter.IPv6DNS[0] != "::1" {
+			reasons = append(reasons, fmt.Sprintf("adapter %q DNS is not set to loopback", adapter.Name))
+		}
+	}
+	if len(reasons) > 0 {
+		return false, strings.Join(reasons, "; "), nil
+	}
+	return true, "", nil
+}
+
 func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -723,19 +837,15 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	if err := lockDownPath(progDir); err != nil {
 		return fmt.Errorf("secure Program Files: %w", err)
 	}
-	if err := lockDownPath(data); err != nil {
-		return fmt.Errorf("secure ProgramData: %w", err)
-	}
 	if err := ensureParentPassword(filepath.Join(data, "parent-auth.json")); err != nil {
 		return err
 	}
-	if _, err := os.Stat(dstConfig); os.IsNotExist(err) {
+	if _, err := os.Stat(dstConfig); errors.Is(err, os.ErrNotExist) {
 		if err := copyFile(srcConfig, dstConfig, 0o600); err != nil {
 			return fmt.Errorf("initialize installed config: %w", err)
 		}
-	}
-	if _, _, err := config.LoadWithFallback(dstConfig); err != nil {
-		return fmt.Errorf("installed config: %w", err)
+	} else if err != nil {
+		return fmt.Errorf("inspect installed config: %w", err)
 	}
 	if err := stopService(service); err != nil {
 		return fmt.Errorf("stop service for upgrade: %w", err)
@@ -803,12 +913,8 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	if err := waitForDNSListeners(ctx); err != nil {
 		return restore(fmt.Errorf("wait for upgraded service: %w", err))
 	}
-	cfg, _, err := config.LoadWithFallback(dstConfig)
-	if err != nil {
-		return restore(fmt.Errorf("load upgraded config: %w", err))
-	}
-	if err := enforcer.Repair(ctx, data, cfg, nil); err != nil {
-		return restore(fmt.Errorf("reconcile upgraded service: %w", err))
+	if err := waitForServiceDashboard(ctx, service); err != nil {
+		return restore(fmt.Errorf("verify upgraded service configuration: %w", err))
 	}
 	if err := enforcer.InstallWatchdog(ctx, exe); err != nil {
 		return restore(fmt.Errorf("install scheduled watchdog: %w", err))

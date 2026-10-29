@@ -70,7 +70,7 @@ try {
         Write-Host 'A new installation will prompt you to create a parent password; it is never included in the package.'
     }
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '/T' '/C' | Out-Null
+    & icacls.exe $dataDir '/inheritance:r' '/grant:r' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Could not restrict permissions on $dataDir (icacls exit code $LASTEXITCODE)."
     }
