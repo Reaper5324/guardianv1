@@ -2,7 +2,7 @@
 
 Guardian is a small Go DNS filtering proxy intended for one Windows computer. It listens on a loopback address, blocks configured domains and selected service domains, optionally blocks all non-allowlisted names during a daily bedtime window, and forwards other DNS queries to upstream resolvers over DNS-over-HTTPS (DoH).
 
-> **Current scope:** This repository contains the DNS proxy and Windows service wrapper. It does not yet configure network-adapter DNS, Windows Firewall, browser policies, VPN restrictions, remote configuration, or tamper alerts. Installing the service alone does **not** make it impossible to bypass DNS filtering. See [Security limits](#security-limits).
+> **Current scope:** This repository contains the DNS proxy and Windows service wrapper. It does not yet configure network-adapter DNS, Windows Firewall, browser policies, VPN restrictions, remote configuration, or local event/status reporting. Installing the service alone does **not** make it impossible to bypass DNS filtering. See [Security limits](#security-limits).
 
 ## How it works
 

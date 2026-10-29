@@ -35,7 +35,7 @@ can uninstall everything.
  |             -> else forward over DoH to an IP literal ------> internet (443)
  |  config     <- polls private GitHub file (ETag, every 5 min)  |
  |  enforcer   -> adapter DNS, firewall rules, browser policies  |
- |  alerts     -> Telegram on tamper / repeated blocked hits     |
+ |  events     -> local rotating log, event log, and status file  |
  +---------------------------------------------------------------+
 ```
 
@@ -48,7 +48,7 @@ internal/blocklist/    suffix matcher, service presets, DoH provider list
 internal/dnsproxy/     UDP+TCP DNS server, DoH forwarder, bedtime logic
 internal/enforcer/     (phase 3) DNS + firewall + browser policy
 internal/remote/       (phase 4) config poller
-internal/alert/        (phase 5) Telegram notifier
+internal/events/       (phase 5) bounded local event and status reporting
 ```
 
 ## Key decisions
@@ -64,7 +64,8 @@ internal/alert/        (phase 5) Telegram notifier
 5. **Browser DoH neutralised three ways:** block well-known DoH hostnames in
    the filter, answer NXDOMAIN for `use-application-dns.net` (Firefox's
    canary domain, which makes Firefox disable DoH), and set browser policies.
-6. **Privacy:** log blocked hits only, not every query.
+6. **Privacy:** log blocked hits only, not every query. All reporting is local;
+  Guardian sends no outbound notifications.
 7. **Hot reload.** Config lives behind an atomic pointer; a bad remote config
    is rejected and the last good one stays active.
 
@@ -81,8 +82,9 @@ internal/alert/        (phase 5) Telegram notifier
 - Block common VPN ports (WireGuard 51820, OpenVPN 1194, IKE 500/4500).
 - Registry policies (HKLM): Chrome and Edge `DnsOverHttpsMode = "off"`;
   Firefox `policies.json` with DNSOverHTTPS disabled and locked.
-- Reconcile loop every ~10 s: re-apply anything that drifted and alert if
-  it did. Binary under `C:\Program Files\Guardian` with admin-only ACLs.
+- Reconcile loop every ~10 s: re-apply anything that drifted and record a
+  local event describing it. Binary under `C:\Program Files\Guardian` with
+  admin-only ACLs.
 
 ## Remote config (phase 4)
 
@@ -102,7 +104,7 @@ See `config.example.json`. Fields: `listen_addr`, `upstream_doh`,
 2. Windows service: install/uninstall, auto-restart on failure.
 3. Enforcer: DNS, firewall, browser policies, reconcile loop.
 4. Remote config polling.
-5. Telegram alerts and tamper detection.
+5. Local events, status reporting, and tamper detection; no outbound alerts.
 6. Hardening: WFP, ACLs, signed config, installer script.
 
 ## Known risks
