@@ -4,67 +4,111 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Guardian · Family safety</title>
+  <title>Guardian · Device protection</title>
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <div class="shell">
     <aside class="rail" aria-label="Application navigation">
-      <a class="brand" href="/" aria-label="Guardian home"><span class="brand-mark">G</span><span>guardian</span></a>
-      <div class="rail-label">WORKSPACE</div>
+      <a class="brand" href="#overview"><span class="brand-mark">G</span><span>guardian</span></a>
+      <div class="rail-label">DEVICE</div>
       <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span> Overview</a>
       <a class="nav-item" href="#protection"><span class="nav-icon">◇</span> Protection</a>
-      <a class="nav-item" href="#schedule"><span class="nav-icon">◷</span> Schedule</a>
-      <div class="rail-foot"><span class="rail-dot"></span><span>Local dashboard</span></div>
+      <a class="nav-item" href="#activity"><span class="nav-icon">≋</span> Activity</a>
+      <a class="nav-item" href="#management"><span class="nav-icon">⚙</span> Management</a>
+      <div class="rail-foot"><span class="rail-dot"></span><span>Local only · no alerts sent</span></div>
     </aside>
 
     <main class="main" id="overview">
       <header class="topbar">
-        <div class="breadcrumbs">Guardian <span>/</span> Overview</div>
-        <div class="local-badge"><span class="live-dot"></span> THIS DEVICE</div>
+        <div class="breadcrumbs">Guardian <span>/</span> Device overview</div>
+        <div class="local-badge"><span class="live-dot" id="service-dot"></span><span id="service-label">Checking service</span></div>
       </header>
 
       <section class="welcome">
         <div>
-          <div class="eyebrow">FAMILY SAFETY CONSOLE</div>
-          <h1>A calmer corner<br>of the internet.</h1>
-          <p class="lead">A clear view of Guardian’s filtering configuration on this device.</p>
+          <div class="eyebrow">GUARDIAN DEVICE CONSOLE</div>
+          <h1>Protection at<br>a glance.</h1>
+          <p class="lead">Live service health, enforcement status, and filtering activity for this device.</p>
         </div>
         <div class="welcome-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orb-core"><span>G</span></div><div class="spark spark-one">✳</div><div class="spark spark-two">✦</div></div>
       </section>
 
       <section class="notice" id="notice" hidden role="status"></section>
-      <section class="stats" aria-label="Configuration summary">
-        <article class="stat-card"><div class="stat-top"><span>Configuration</span><span class="stat-symbol mint">✓</span></div><div class="stat-value" id="version">—</div><div class="stat-caption">Version</div></article>
-        <article class="stat-card"><div class="stat-top"><span>Protected services</span><span class="stat-symbol lavender">◇</span></div><div class="stat-value" id="service-count">—</div><div class="stat-caption">Built-in rule sets</div></article>
-        <article class="stat-card"><div class="stat-top"><span>Custom rules</span><span class="stat-symbol peach">⌁</span></div><div class="stat-value" id="rule-count">—</div><div class="stat-caption">Block and allow entries</div></article>
-        <article class="stat-card"><div class="stat-top"><span>Secure DNS</span><span class="stat-symbol blue">◎</span></div><div class="stat-value small-value" id="doh-status">—</div><div class="stat-caption">Provider hostname filtering</div></article>
+      <section class="stats" aria-label="Live service summary">
+        <article class="stat-card"><div class="stat-top"><span>DNS service</span><span class="stat-symbol mint">●</span></div><div class="stat-value small-value" id="dns-state">—</div><div class="stat-caption" id="dns-caption">Listener health</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Blocked today</span><span class="stat-symbol peach">⌁</span></div><div class="stat-value" id="blocked-today">—</div><div class="stat-caption">Counts only · no domain history</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Configuration</span><span class="stat-symbol lavender">◇</span></div><div class="stat-value" id="version">—</div><div class="stat-caption" id="config-caption">Active revision</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Upstreams</span><span class="stat-symbol blue">◎</span></div><div class="stat-value small-value" id="upstream-state">—</div><div class="stat-caption" id="upstream-caption">Encrypted DNS health</div></article>
       </section>
 
       <div class="content-grid">
         <section class="panel" id="protection">
-          <div class="panel-heading"><div><div class="eyebrow">FILTERING</div><h2>Protection profile</h2></div><span class="pill" id="config-state">Loading</span></div>
-          <p class="panel-copy">Guardian checks DNS requests against the selected service profiles and custom rules before forwarding permitted lookups over encrypted DNS.</p>
-          <div class="service-list" id="services" aria-live="polite"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+          <div class="panel-heading"><div><div class="eyebrow">FILTERING & ENFORCEMENT</div><h2>Protection profile</h2></div><span class="pill" id="enforcement-state">Checking</span></div>
+          <p class="panel-copy">Blocked DNS names return NXDOMAIN. Allowed names are forwarded over HTTPS to configured IP-literal resolvers; upstream failure returns SERVFAIL.</p>
+          <div class="section-label">BUILT-IN PROFILES</div>
+          <div class="service-list" id="services" aria-live="polite"><div class="skeleton"></div></div>
+          <div class="detail-grid">
+            <div class="detail-tile"><span>DNS listeners</span><strong id="listener">—</strong></div>
+            <div class="detail-tile"><span>Encrypted upstreams</span><strong id="upstream-count">—</strong></div>
+            <div class="detail-tile"><span>Custom block entries</span><strong id="blocked-count">—</strong></div>
+            <div class="detail-tile"><span>Allow entries</span><strong id="allowed-count">—</strong></div>
+            <div class="detail-tile"><span>Known DoH domains</span><strong id="doh-policy">—</strong></div>
+            <div class="detail-tile"><span>Firewall rules</span><strong id="firewall-count">—</strong></div>
+          </div>
           <div class="panel-divider"></div>
-          <div class="detail-row"><span>DNS listener</span><strong id="listener">—</strong></div>
-          <div class="detail-row"><span>Encrypted upstreams</span><strong id="upstream-count">—</strong></div>
+          <div class="section-label">NETWORK ADAPTERS</div>
+          <div id="adapters" class="adapter-list"><span class="empty-copy">Waiting for enforcement status…</span></div>
         </section>
 
-        <section class="panel schedule-panel" id="schedule">
-          <div class="panel-heading"><div><div class="eyebrow">DAILY ROUTINE</div><h2>Bedtime schedule</h2></div><span class="clock-icon">◷</span></div>
-          <div class="schedule-state"><span class="schedule-dot" id="bedtime-dot"></span><span id="bedtime-state">Checking schedule…</span></div>
-          <div class="time-card"><div><span class="time-label">STARTS</span><strong id="bedtime-start">—</strong></div><span class="time-arrow">→</span><div><span class="time-label">ENDS</span><strong id="bedtime-end">—</strong></div></div>
-          <div class="detail-row"><span>Time zone</span><strong id="timezone">—</strong></div>
-          <p class="fine-print" id="schedule-note">When enabled, non-allowlisted names are blocked during this window.</p>
-        </section>
+        <div class="side-stack">
+          <section class="panel schedule-panel" id="schedule">
+            <div class="panel-heading"><div><div class="eyebrow">DAILY ROUTINE</div><h2>Bedtime schedule</h2></div><span class="clock-icon">◷</span></div>
+            <div class="schedule-state"><span class="schedule-dot" id="bedtime-dot"></span><span id="bedtime-state">Checking schedule…</span></div>
+            <div class="time-card"><div><span class="time-label">STARTS</span><strong id="bedtime-start">—</strong></div><span class="time-arrow">→</span><div><span class="time-label">ENDS</span><strong id="bedtime-end">—</strong></div></div>
+            <div class="detail-row"><span>Time zone</span><strong id="timezone">—</strong></div>
+            <p class="fine-print" id="schedule-note">Allowlisted domains remain available during bedtime.</p>
+          </section>
+
+          <section class="panel sync-panel">
+            <div class="panel-heading"><div><div class="eyebrow">REMOTE CONFIGURATION</div><h2>Sync status</h2></div><span class="pill" id="remote-state">Checking</span></div>
+            <div class="detail-row"><span>Remote updates</span><strong id="remote-enabled">—</strong></div>
+            <div class="detail-row"><span>Signature required</span><strong id="signature-state">—</strong></div>
+            <div class="detail-row"><span>Last sync</span><strong id="last-sync">—</strong></div>
+            <div class="detail-row"><span>Last enforcement drift</span><strong id="last-drift">—</strong></div>
+          </section>
+        </div>
       </div>
 
-      <footer class="footer"><div><span class="footer-mark">G</span> Guardian <span class="footer-sep">·</span> Private by design</div><div id="updated">Reading local configuration…</div></footer>
-      <p class="disclaimer">This dashboard displays configuration only; it does not confirm that the Windows service is running or that network-wide enforcement is active.</p>
+      <section class="panel activity-panel" id="activity">
+        <div class="panel-heading"><div><div class="eyebrow">LOCAL EVENT SUMMARY</div><h2>Recent activity</h2></div><span class="pill">On this device</span></div>
+        <p class="panel-copy">Guardian keeps bounded local event summaries. Domain names and individual browsing history are not shown here.</p>
+        <div class="activity-list" id="activity-list"><span class="empty-copy">Loading recent events…</span></div>
+      </section>
+
+      <section class="panel management-panel" id="management">
+        <div class="panel-heading"><div><div class="eyebrow">ADMINISTRATION</div><h2>Manage Guardian</h2></div><span class="pill">Local device</span></div>
+        <p class="panel-copy">Configuration is intentionally read-only here. Change lists, profiles, bedtime, or remote settings through the protected administrator config workflow, then restart Guardian or wait for remote sync.</p>
+        <div class="management-actions">
+          <button type="button" class="button secondary" id="repair-button" disabled>Repair enforcement</button>
+          <span id="repair-result" class="action-result" role="status"></span>
+        </div>
+        <div class="uninstall-box" id="uninstall-box" hidden>
+          <div><strong>Uninstall Guardian</strong><p>Enter the parent password created during installation. This restores saved adapter DNS and removes Guardian policies.</p></div>
+          <form id="uninstall-form">
+            <label for="parent-password">Parent password</label>
+            <div class="password-row"><input id="parent-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="current-password" required><button type="submit" class="button danger" id="uninstall-button">Uninstall</button></div>
+          </form>
+          <span id="uninstall-result" class="action-result" role="status"></span>
+        </div>
+        <p class="fine-print">Management actions are local. Uninstall requires the parent password; Windows administrator access remains the recovery path if that password is lost.</p>
+      </section>
+
+      <footer class="footer"><div><span class="footer-mark">G</span> Guardian <span class="footer-sep">·</span> Private by design</div><div id="updated">Connecting to local service…</div></footer>
+      <p class="disclaimer">Guardian is designed to deter bypasses by a standard account, not an administrator. VPN/DoH over 443, hardcoded-IP apps, and mobile data remain limitations.</p>
     </main>
   </div>
-  <noscript><div class="noscript">Enable JavaScript to view the local configuration dashboard.</div></noscript>
+  <noscript><div class="noscript">Enable JavaScript to view Guardian’s local operations dashboard.</div></noscript>
 </body>
 </html>

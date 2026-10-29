@@ -170,6 +170,34 @@ and required files, protects ProgramData, provisions supplied token/public-key
 files, and invokes `guardian.exe install`. The service installer preserves an
 already-installed config during upgrades.
 
+On a new installation, `guardian install` prompts for a parent password
+without echoing it to the console. Choose at least 12 characters and retain
+the password; only a salted verifier is saved in the protected
+`%ProgramData%\Guardian\parent-auth.json`. The local dashboard requires this
+password for its uninstall action. A standard account can request uninstall
+through the dashboard; the SYSTEM service performs the operation and restores
+saved DNS. The command-line `uninstall` path also verifies the password and
+still requires administrator access. If the password is lost, an
+administrator can reset the verifier and reinstall.
+
+When the service is running, open
+[`http://127.0.0.1:8765`](http://127.0.0.1:8765) on the device. The dashboard
+shows DNS listener health, adapter DNS, firewall-rule presence, configuration
+and bedtime settings, upstream and remote-sync status, blocked counts, and
+recent local event summaries. It offers an enforcement repair action and a
+parent-password-gated uninstall action. It intentionally does not edit
+configuration; make changes through the protected administrator config
+workflow or the remote signed-config workflow. The `guardian ui` command can
+also serve a standalone read-only view for local development.
+
+Double-clicking the packaged `guardian.exe` starts the local dashboard in
+your browser; it does not install or activate DNS filtering. The console stays
+open while the dashboard is served. To enable service enforcement, use the
+elevated PowerShell installer above. The package includes a valid port-53
+`config.json`, `install.ps1`, and this guide. If the dashboard cannot start,
+the executable prints the error and suggested commands and waits for Enter so
+the message remains visible.
+
 Useful elevated or remote-session commands:
 
 ```powershell

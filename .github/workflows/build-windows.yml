@@ -1,4 +1,4 @@
-name: Build Windows executable
+name: Build Guardian Windows package
 
 on:
   workflow_dispatch:
@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - "guardian/**"
+      - "install.ps1"
+      - "README.md"
       - ".github/workflows/build-windows.yml"
 
 permissions:
@@ -23,28 +25,40 @@ jobs:
         with:
           go-version-file: guardian/go.mod
 
-      - name: Prepare output directory
+      - name: Prepare package directory
         working-directory: guardian
         run: New-Item -ItemType Directory -Force dist | Out-Null
         shell: pwsh
 
-      - name: Resolve dependencies and checksums
+      - name: Test and build Windows executable
         working-directory: guardian
-        run: go mod tidy
-
-      - name: Build Windows executable
-        working-directory: guardian
-        run: go build -trimpath -ldflags="-s -w" -o dist/guardian.exe ./cmd/guardian
-
-      - name: Include example configuration
-        working-directory: guardian
-        run: Copy-Item config.example.json dist/config.example.json
+        run: |
+          go mod download
+          go test ./...
+          go build -trimpath -ldflags="-s -w" -o dist/guardian.exe ./cmd/guardian
         shell: pwsh
 
-      - name: Upload executable artifact
+      - name: Assemble installable package
+        working-directory: guardian
+        run: |
+          Copy-Item config.example.json dist/config.json
+          $configPath = Join-Path (Get-Location) 'dist/config.json'
+          $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+          $config.listen_addr = '127.0.0.1:53'
+          $json = ConvertTo-Json -InputObject $config -Depth 10
+          [System.IO.File]::WriteAllText($configPath, $json, [System.Text.UTF8Encoding]::new($false))
+          New-Item -ItemType Directory -Force dist\guardian | Out-Null
+          Copy-Item ..\install.ps1 dist\install.ps1
+          Copy-Item ..\README.md dist\README.md
+          Copy-Item DESIGN.md dist\guardian\DESIGN.md
+          Copy-Item config.example.json dist\guardian\config.example.json
+          Compress-Archive -Path dist\guardian.exe,dist\config.json,dist\install.ps1,dist\README.md,dist\guardian -DestinationPath Guardian-Windows-x64.zip -Force
+        shell: pwsh
+
+      - name: Upload installable package
         uses: actions/upload-artifact@v4
         with:
-          name: guardian-windows-amd64
-          path: guardian/dist/*
+          name: Guardian-Windows-x64
+          path: guardian/Guardian-Windows-x64.zip
           if-no-files-found: error
           retention-days: 14

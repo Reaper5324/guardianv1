@@ -19,6 +19,13 @@ import (
 // Run loads the config and serves DNS until ctx is cancelled. It returns nil
 // on a clean shutdown and an error if startup or serving fails.
 func Run(ctx context.Context, cfgPath string) error {
+	return RunWithUninstall(ctx, cfgPath, nil)
+}
+
+// RunWithUninstall runs Guardian and optionally exposes an uninstall request
+// callback to the local dashboard. The callback must only request shutdown;
+// service removal happens after the service handler exits.
+func RunWithUninstall(ctx context.Context, cfgPath string, requestUninstall func() error) error {
 	cfg, usedFallback, err := config.LoadWithFallback(cfgPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -80,6 +87,11 @@ func Run(ctx context.Context, cfgPath string) error {
 	log.Printf("guardian listening on %s", cfg.ListenAddr)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go func() {
+		if err := runDashboard(runCtx, cfgPath, requestUninstall); err != nil && runCtx.Err() == nil {
+			log.Printf("dashboard: unavailable: %v", err)
+		}
+	}()
 	listening := make(chan struct{})
 	proxy.OnListening = func() { close(listening) }
 	proxyDone := make(chan error, 1)

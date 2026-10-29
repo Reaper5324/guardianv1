@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"guardian/internal/config"
 )
 
 const rulePrefix = "Guardian-"
+
+var reconciliationMu sync.Mutex
 
 type Adapter struct {
 	ID      string
@@ -78,6 +81,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, cfg *config.Config) ([]strin
 	if err := r.validate(cfg); err != nil {
 		return nil, err
 	}
+	reconciliationMu.Lock()
+	defer reconciliationMu.Unlock()
 	state, err := r.State.Load()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("load adapter DNS state: %w", err)
@@ -196,6 +201,8 @@ func (r *Reconciler) Remove(ctx context.Context) error {
 	if r == nil || r.Adapters == nil || r.Firewall == nil || r.Policies == nil || r.State == nil {
 		return errors.New("enforcer dependencies are incomplete")
 	}
+	reconciliationMu.Lock()
+	defer reconciliationMu.Unlock()
 	state, err := r.State.Load()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("load adapter DNS state: %w", err)

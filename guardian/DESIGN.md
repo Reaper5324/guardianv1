@@ -20,6 +20,7 @@ Guardian service (LocalSystem)
    +-- ten-second enforcement reconciliation
    +-- five-minute private GitHub config poll (optional)
    +-- bounded local events, rotating file, Windows Event Log, status JSON
+   +-- loopback operations dashboard on 127.0.0.1:8765
    +-- service recovery actions and one-minute scheduled repair watchdog
 ```
 
@@ -109,6 +110,31 @@ administrator/developer machine, not on the child's laptop.
 - Log rotation keeps the active log and one rotated file, each capped at
   5 MiB. Individual records larger than the cap are rejected rather than
   allowed to grow the file without bound.
+
+## Local operations dashboard
+
+The Windows service hosts a loopback-only dashboard at
+`http://127.0.0.1:8765`. It presents listener health, adapter DNS, Guardian
+firewall-rule count, active configuration settings, bedtime state, upstream
+health, remote sync, blocked counts, and sanitized recent events. It does not
+display configured domains or per-query history. The repair action invokes
+the same enforcement reconciler used by the service; reconciliations are
+serialized so an operator action cannot race the periodic loop.
+
+Configuration editing is intentionally excluded from the UI. Only an
+administrator can change the protected local config; remote updates use the
+existing validated and optionally signed workflow. New installs prompt for a
+parent password and store only a salted PBKDF2-HMAC-SHA256 verifier in the
+ACL-protected ProgramData directory. The dashboard verifies that password
+before asking the SYSTEM service to stop and remove itself, restore saved DNS,
+and remove its enforcement policies. Password failures are rate-limited.
+The direct CLI uninstall route also requires the parent password and
+administrator access. If the password is lost, an administrator must reset
+the verifier before installing again.
+
+The dashboard's POST routes require a same-origin request and bind only to
+IPv4 loopback. `guardian ui` remains a standalone read-only dashboard for
+development and does not receive service management callbacks.
 
 ## Operations and known failure modes
 

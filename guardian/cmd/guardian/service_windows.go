@@ -22,6 +22,7 @@ import (
 
 	"guardian/internal/app"
 	"guardian/internal/config"
+	"guardian/internal/dashboard"
 	"guardian/internal/enforcer"
 	"guardian/internal/events"
 )
@@ -30,6 +31,8 @@ const (
 	serviceName = "GuardianDNS"
 	displayName = "Guardian DNS Filter"
 )
+
+var serviceUninstallRequests = make(chan struct{}, 1)
 
 // dataDir holds the live config and the log. Install locks it down to
 // SYSTEM and Administrators only.
@@ -57,9 +60,18 @@ func runService() {
 	} else {
 		log.Printf("cannot open service log: %v", err)
 	}
-	if err := svc.Run(serviceName, &handler{cfgPath: cfgPath}); err != nil {
+	err := svc.Run(serviceName, &handler{cfgPath: cfgPath})
+	if err != nil {
 		log.Printf("service failed: %v", err)
 		os.Exit(1)
+	}
+	select {
+	case <-serviceUninstallRequests:
+		if err := uninstallServiceSystem(); err != nil {
+			log.Printf("dashboard uninstall failed: %v", err)
+			os.Exit(1)
+		}
+	default:
 	}
 }
 
@@ -77,7 +89,17 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- app.Run(ctx, h.cfgPath) }()
+	go func() {
+		done <- app.RunWithUninstall(ctx, h.cfgPath, func() error {
+			select {
+			case serviceUninstallRequests <- struct{}{}:
+				cancel()
+				return nil
+			default:
+				return errors.New("uninstall is already pending")
+			}
+		})
+	}()
 	status <- svc.Status{State: svc.Running, Accepts: accepted}
 
 	for {
@@ -150,6 +172,9 @@ func installService(srcConfig string) (retErr error) {
 	}
 	if err := lockDownPath(progDir); err != nil {
 		return fmt.Errorf("secure Program Files: %w", err)
+	}
+	if err := ensureParentPassword(filepath.Join(data, "parent-auth.json")); err != nil {
+		return err
 	}
 	stagedExe := exe + ".new"
 	if err := copyFile(self, stagedExe, 0o755); err != nil {
@@ -241,6 +266,17 @@ func installService(srcConfig string) (retErr error) {
 }
 
 func uninstallService() error {
+	password, err := readParentPassword("Enter the parent password to uninstall Guardian: ")
+	if err != nil {
+		return err
+	}
+	if err := dashboard.VerifyParentPassword(filepath.Join(dataDir(), "parent-auth.json"), password); err != nil {
+		return errors.New("parent password verification failed")
+	}
+	return uninstallServiceSystem()
+}
+
+func uninstallServiceSystem() error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("cannot reach the service manager (run as Administrator): %w", err)
@@ -682,6 +718,9 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	if err := lockDownPath(data); err != nil {
 		return fmt.Errorf("secure ProgramData: %w", err)
 	}
+	if err := ensureParentPassword(filepath.Join(data, "parent-auth.json")); err != nil {
+		return err
+	}
 	if _, err := os.Stat(dstConfig); os.IsNotExist(err) {
 		if err := copyFile(srcConfig, dstConfig, 0o600); err != nil {
 			return fmt.Errorf("initialize installed config: %w", err)
@@ -771,5 +810,28 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 		return fmt.Errorf("remove upgrade rollback binary: %w", err)
 	}
 	fmt.Printf("Upgraded and restarted %s; existing config was preserved.\n", serviceName)
+	return nil
+}
+
+func ensureParentPassword(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect parent password verifier: %w", err)
+	}
+	first, err := readParentPassword("Create a parent password (at least 12 characters): ")
+	if err != nil {
+		return err
+	}
+	second, err := readParentPassword("Confirm parent password: ")
+	if err != nil {
+		return err
+	}
+	if first != second {
+		return errors.New("parent passwords do not match")
+	}
+	if err := dashboard.SetParentPassword(path, first); err != nil {
+		return fmt.Errorf("save parent password verifier: %w", err)
+	}
 	return nil
 }
