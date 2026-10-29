@@ -7,5 +7,13 @@
   "allowed_domains": [],
   "block_doh_providers": true,
   "bedtime": { "start": "22:00", "end": "06:00" },
-  "timezone": "Africa/Johannesburg"
+  "timezone": "Africa/Johannesburg",
+  "remote": {
+    "enabled": false,
+    "owner": "",
+    "repository": "",
+    "branch": "main",
+    "path": "config.json",
+    "require_signature": false
+  }
 }

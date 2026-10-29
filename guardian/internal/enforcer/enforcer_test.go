@@ -215,3 +215,41 @@ func TestFileStateStoreRoundTrip(t *testing.T) {
 		t.Fatal("Load succeeded after state removal")
 	}
 }
+
+func TestRemoveRestoresTrackedInactiveAdapters(t *testing.T) {
+	adapter := &fakeAdapters{items: []Adapter{{
+		ID:      "wifi-1",
+		Name:    "Wi-Fi",
+		Up:      false,
+		IPv4DNS: []string{"127.0.0.1"},
+		IPv6DNS: []string{"::1"},
+	}}}
+	state := &fakeState{saved: true, value: State{Adapters: map[string]OriginalDNS{
+		"wifi-1": {
+			Name:    "Wi-Fi",
+			IPv4DNS: []string{"192.0.2.53"},
+			IPv6DNS: []string{"2001:db8::53"},
+		},
+	}}}
+	firewall := &fakeFirewall{}
+	policies := &fakePolicies{}
+	reconciler := &Reconciler{
+		Adapters: adapter,
+		Firewall: firewall,
+		Policies: policies,
+		State:    state,
+	}
+
+	if err := reconciler.Remove(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := adapter.items[0].IPv4DNS; len(got) != 1 || got[0] != "192.0.2.53" {
+		t.Errorf("restored IPv4 DNS = %v, want original DNS", got)
+	}
+	if got := adapter.items[0].IPv6DNS; len(got) != 1 || got[0] != "2001:db8::53" {
+		t.Errorf("restored IPv6 DNS = %v, want original DNS", got)
+	}
+	if !firewall.removed || !policies.removed || !state.removed {
+		t.Errorf("cleanup incomplete: firewall=%v policies=%v state=%v", firewall.removed, policies.removed, state.removed)
+	}
+}

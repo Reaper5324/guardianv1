@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -45,11 +46,63 @@ func TestInBedtime(t *testing.T) {
 	}
 }
 
+func TestInBedtimeAcrossDSTAndClockZoneChanges(t *testing.T) {
+	cfg, err := Parse([]byte(`{"timezone":"America/New_York","bedtime":{"start":"01:30","end":"03:30"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{
+			name: "spring transition before skipped hour",
+			now:  time.Date(2025, time.March, 9, 6, 59, 0, 0, time.UTC),
+			want: true,
+		},
+		{
+			name: "spring transition after skipped hour",
+			now:  time.Date(2025, time.March, 9, 7, 0, 0, 0, time.UTC),
+			want: true,
+		},
+		{
+			name: "first repeated fall-back hour",
+			now:  time.Date(2025, time.November, 2, 5, 30, 0, 0, time.UTC),
+			want: true,
+		},
+		{
+			name: "second repeated fall-back hour",
+			now:  time.Date(2025, time.November, 2, 6, 30, 0, 0, time.UTC),
+			want: true,
+		},
+		{
+			name: "window end boundary",
+			now:  time.Date(2025, time.January, 15, 8, 30, 0, 0, time.UTC),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cfg.InBedtime(tt.now); got != tt.want {
+				t.Errorf("InBedtime(%s) = %v, want %v", tt.now.Format(time.RFC3339), got, tt.want)
+			}
+		})
+	}
+
+	localEquivalent := time.Date(2025, time.January, 15, 3, 0, 0, 0, time.FixedZone("changed-system-zone", -5*60*60))
+	utcEquivalent := localEquivalent.UTC()
+	if got, want := cfg.InBedtime(localEquivalent), cfg.InBedtime(utcEquivalent); got != want {
+		t.Errorf("system time-zone representation changed bedtime result: %v != %v", got, want)
+	}
+}
+
 func TestParseRejectsInvalidConfiguration(t *testing.T) {
 	for _, raw := range []string{
 		`{"blocked_service":["instagram"]}`,
 		`{"blocked_domains":[""]}`,
 		`{"allowed_domains":["not a domain"]}`,
+		`{"blocked_services":["unknown-service"]}`,
 		`{"bedtime":{"start":"22:00","end":"22:00"}}`,
 		`{"listen_addr":"0.0.0.0:53"}`,
 	} {
@@ -118,6 +171,25 @@ func TestStoreRejectsVersionDowngrade(t *testing.T) {
 	}
 	if got := store.Get().Version; got != 8 {
 		t.Fatalf("active version = %d, want 8", got)
+	}
+}
+
+func TestStoreCommitFailurePreservesActiveConfig(t *testing.T) {
+	store := &Store{}
+	active := testConfig(t, `null`)
+	active.Version = 3
+	if err := store.Set(active); err != nil {
+		t.Fatal(err)
+	}
+	next := testConfig(t, `null`)
+	next.Version = 4
+	next.BlockedDomains = []string{"new.example"}
+	if err := store.Update(next, func() error { return errors.New("disk write failed") }); err == nil {
+		t.Fatal("Update succeeded despite commit failure")
+	}
+	got := store.Get()
+	if got.Version != active.Version || len(got.BlockedDomains) != 0 {
+		t.Fatalf("active config changed after failed commit: %+v", got)
 	}
 }
 

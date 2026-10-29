@@ -12,21 +12,20 @@ func runService()     {}
 
 func installService(string) error {
 	return errors.New("install is only supported on Windows")
-	}
+}
 
-	func uninstallService() error {
-		return errors.New("uninstall is only supported on Windows")
-	}
+func uninstallService() error {
+	return errors.New("uninstall is only supported on Windows")
+}
 
-	func showStatus() error {
-		return errors.New("status is only supported on Windows")
-	}
+func showStatus() error {
+	return errors.New("status is only supported on Windows")
+}
 
-	func showEvents(int) error {
-		return errors.New("events are only supported on Windows")
-	}
+func showEvents(int) error {
+	return errors.New("events are only supported on Windows")
+}
 
-	func repairService() error {
-		return errors.New("repair is only supported on Windows")
-		}
-		
+func repairService() error {
+	return errors.New("repair is only supported on Windows")
+}

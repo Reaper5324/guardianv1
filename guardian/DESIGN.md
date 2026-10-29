@@ -1,116 +1,136 @@
-# Guardian: system design
+# Guardian system design
 
-A single Windows service that filters DNS on one laptop, enforces that the
-filter can't be bypassed, and is configured remotely. Free, router
-independent, no hardware.
+Guardian is a local DNS-filtering service for one Windows laptop. Its security
+boundary is a standard child account; administrator and physical access are
+trusted and cannot be defeated by this project.
 
-## Goals and non-goals
+## What runs
 
-- Block chosen services (Instagram, TikTok, Snapchat) plus an optional
-  bedtime cut-off, on this one laptop.
-- Survive a curious kid: changing DNS, browser secure-DNS, VPN apps.
-- Be remotely configurable by Lovell and mom without touching the laptop.
-- Non-goals: other devices, mobile data, defeating someone with admin rights
-  or physical access (BIOS password and disk encryption cover that).
+```text
+Applications
+   | DNS UDP/TCP
+   v
+127.0.0.1:53 and [::1]:53
+   | block/allow suffix matching, bedtime, bounded response cache
+   +-- blocked --> NXDOMAIN
+   +-- allowed --> HTTPS DoH to configured IP-literal upstream
+                      | failure --> SERVFAIL
 
-## Trust boundary (the most important decision)
-
-| Account | Rights |
-|---|---|
-| Brother | Standard user. Cannot stop the service, edit its files, change firewall or adapter DNS. |
-| Mom / Lovell | Admin. Password not known to the brother. |
-
-Every layer below is only as strong as this boundary. If he has admin, he
-can uninstall everything.
-
-## Architecture
-
-```
- Apps / browsers
-       |  DNS (53)
-       v
- 127.0.0.1:53  ----------------------------+
- +------------------ guardian.exe (SYSTEM service) --------------+
- |  dnsproxy   -> blocklist match -> NXDOMAIN (blocked)          |
- |             -> else forward over DoH to an IP literal ------> internet (443)
- |  config     <- polls private GitHub file (ETag, every 5 min)  |
- |  enforcer   -> adapter DNS, firewall rules, browser policies  |
- |  events     -> local rotating log, event log, and status file  |
- +---------------------------------------------------------------+
+Guardian service (LocalSystem)
+   +-- ten-second enforcement reconciliation
+   +-- five-minute private GitHub config poll (optional)
+   +-- bounded local events, rotating file, Windows Event Log, status JSON
+   +-- service recovery actions and one-minute scheduled repair watchdog
 ```
 
-## Packages
+## Decisions and invariants
 
-```
-cmd/guardian/          entry point, wiring, (later) service install/run
-internal/config/       schema, validation, atomic hot-swap Store
-internal/blocklist/    suffix matcher, service presets, DoH provider list
-internal/dnsproxy/     UDP+TCP DNS server, DoH forwarder, bedtime logic
-internal/enforcer/     (phase 3) DNS + firewall + browser policy
-internal/remote/       (phase 4) config poller
-internal/events/       (phase 5) bounded local event and status reporting
-```
+1. **No resolver bootstrap cycle.** Configured DoH URLs must use IP literals.
+   The remote GitHub poll uses the machine's system resolver; while the
+   enforcer is active, that resolver points to Guardian, whose own DoH
+   connections use IP literals.
+2. **Fail closed.** A blocked name gets NXDOMAIN. If all upstreams fail, the
+   proxy returns SERVFAIL and never forwards to a system/default resolver.
+3. **Allowlist precedence.** Explicit allow entries win over block entries
+   and bedtime. All rules match a domain and its subdomains on label
+   boundaries.
+4. **Last-known-good config.** Parsing, preset validation, and derived
+   matcher construction happen before remote state is committed. A failed
+   persistence callback does not publish an update. Boot falls back to the
+   most recent valid config file. Lower remote versions are rejected.
+5. **DNS cache safety.** The filter checks block and bedtime rules before
+   cache lookup. Cache keys include the config snapshot namespace, entries
+   have bounded capacity and TTL, SERVFAIL is never cached, and reload clears
+   the cache.
+6. **Local-only reporting.** Guardian sends no email, SMS, webhook, or chat
+   notifications. Events are bounded, deduplicated in time windows, and
+   emitted asynchronously away from the DNS request path. Status stores
+   counts and event summaries, not domains or every DNS query.
+7. **OS changes are repeatable.** Adapter, firewall, browser policy, service,
+   and watchdog operations are designed to reconcile or restore idempotently.
+   Original DNS and browser policy state are saved before changing them.
 
-## Key decisions
+## Windows enforcement
 
-1. **DoH upstream by IP literal** (`https://1.1.1.1/dns-query`). The filter
-   can't resolve names through itself, so no bootstrap problem. Config
-   validation rejects hostnames.
-2. **Suffix matching.** Blocking `instagram.com` also blocks
-   `www.instagram.com`, `i.instagram.com`, etc. Allowlist wins over blocklist.
-3. **NXDOMAIN for blocked names.** Simple and works for every record type.
-4. **Fail closed.** If all upstreams fail, return SERVFAIL. No internet is
-   better than unfiltered internet; the watchdog and alerts handle recovery.
-5. **Browser DoH neutralised three ways:** block well-known DoH hostnames in
-   the filter, answer NXDOMAIN for `use-application-dns.net` (Firefox's
-   canary domain, which makes Firefox disable DoH), and set browser policies.
-6. **Privacy:** log blocked hits only, not every query. All reporting is local;
-  Guardian sends no outbound notifications.
-7. **Hot reload.** Config lives behind an atomic pointer; a bad remote config
-   is rejected and the last good one stays active.
+- Active network adapters are reconciled to IPv4 `127.0.0.1` and IPv6 `::1`.
+  The adapter inventory includes inactive adapters so uninstall can restore
+  their saved values.
+- Firewall rules use the `Guardian-` prefix. They block outbound TCP/UDP 53
+  and TCP 853 outside loopback, selected resolver IPs on TCP/UDP 443, and
+  common WireGuard, OpenVPN, IKE/IPsec, PPTP, and L2TP ports.
+- The configured DoH upstream IPs are excluded from resolver blocks so
+  LocalSystem can reach them. This is a practical implementation choice, not
+  a per-user firewall exemption: an application in the standard account may
+  also reach those IPs directly.
+- Chrome and Edge receive managed DoH-off registry values. Firefox receives
+  a locked `DNSOverHTTPS` policy in each standard Program Files installation
+  found. Existing registry values and Firefox policy files are backed up
+  before Guardian modifies them and restored on uninstall.
+- VPN-over-443 and DoH-over-443 to unlisted IPs cannot be fully prevented.
+  Portable browsers, hardcoded-IP apps, and alternate tunnels may bypass DNS
+  filtering. Mobile data that does not traverse the laptop is outside scope.
+- The service DACL grants service control to SYSTEM and Administrators. Files
+  under Program Files and ProgramData are ACL-restricted by installation.
+  `guardian status` checks common writable-user ACL entries; a real Windows
+  standard-account test is still required to establish actual protection.
+- A scheduled task runs `guardian repair` as SYSTEM every minute. That command
+  starts a stopped service and reconciles enforcement. Service Control
+  Manager recovery actions separately restart process failures.
 
-## Enforcement plan (phase 3)
+All policy decisions live in platform-independent interfaces and are tested
+with fakes on non-Windows systems. The PowerShell/SCM effects themselves need
+validation on the supported Windows release; cross-compilation cannot verify
+firewall address parsing, DNS cmdlets, ACL inheritance, or Task Scheduler
+permissions.
 
-- Set IPv4 DNS to `127.0.0.1` and IPv6 DNS to `::1` on all adapters (and
-  listen on both, or Windows will happily use an IPv6 resolver).
-- Windows Firewall: block outbound TCP/UDP 53 and TCP 853 to non-loopback.
-  The service uses 443, so it is unaffected.
-- Block 443 to known public DoH resolver IPs. The service's own upstream IP
-  would be caught by this, so either exclude it from the list, or scope the
-  block rules to the brother's user SID so the SYSTEM service is exempt
-  (verify on the real machine). Later, use WFP permit filters instead.
-- Block common VPN ports (WireGuard 51820, OpenVPN 1194, IKE 500/4500).
-- Registry policies (HKLM): Chrome and Edge `DnsOverHttpsMode = "off"`;
-  Firefox `policies.json` with DNSOverHTTPS disabled and locked.
-- Reconcile loop every ~10 s: re-apply anything that drifted and record a
-  local event describing it. Binary under `C:\Program Files\Guardian` with
-  admin-only ACLs.
+## Remote configuration
 
-## Remote config (phase 4)
+The optional poller reads a private repository's Contents API endpoint with a
+read-only token from `%ProgramData%\Guardian\github-token.txt`. It sends and
+retains ETags in memory, validates strict JSON, enforces an increasing
+version, builds the next matcher, persists both primary and last-known-good
+files, then publishes the new DNS snapshot. Any failure leaves the active
+snapshot untouched and emits a deduplicated local event. Tokens never enter
+configuration, event text, or logs.
 
-Private GitHub repo with `config.json`. The service polls the raw file with a
-read-only fine-grained token (stored in a SYSTEM-only ACL'd file) and uses
-ETag to avoid needless downloads. Optional hardening: sign the config.
+When signature enforcement is enabled, the poller verifies a detached
+base64-encoded Ed25519 signature from a sibling `.sig` repository file against
+the public key in ProgramData. The signing private key belongs on a trusted
+administrator/developer machine, not on the child's laptop.
 
-## Config schema
+## Event and status data
 
-See `config.example.json`. Fields: `listen_addr`, `upstream_doh`,
-`blocked_services`, `blocked_domains`, `allowed_domains`,
-`block_doh_providers`, `bedtime {start,end}`, `timezone`.
+- Event records are queued non-blockingly in a bounded channel, deduplicated
+  by type/category/message within a configured window, and written to a
+  rotating JSON-lines file and (on Windows) the Guardian Event Log source.
+- The atomic status JSON contains service start time, config revision, remote
+  sync result, last drift, upstream health, the latest 100 events, and
+  category hit counts per day. It does not contain queried domain names.
+- Log rotation keeps the active log and one rotated file, each capped at
+  5 MiB. Individual records larger than the cap are rejected rather than
+  allowed to grow the file without bound.
 
-## Build phases
+## Operations and known failure modes
 
-1. DNS proxy + blocklist + bedtime, run from a console (this drop).
-2. Windows service: install/uninstall, auto-restart on failure.
-3. Enforcer: DNS, firewall, browser policies, reconcile loop.
-4. Remote config polling.
-5. Local events, status reporting, and tamper detection; no outbound alerts.
-6. Hardening: WFP, ACLs, signed config, installer script.
+The installer accepts only a port-53 config, protects ProgramData and Program
+Files, installs an automatic LocalSystem service, configures recovery, starts
+the service, applies enforcement, and installs the watchdog. Reinstalling
+upgrades the executable while preserving the installed configuration. Clean
+uninstall restores saved adapter DNS and browser policy state and removes
+Guardian firewall rules and the watchdog.
 
-## Known risks
+If enforcement or the service fails, DNS can fail closed and temporarily
+interrupt name resolution. Use `guardian repair` from an elevated remote
+session. If the service executable is unavailable, restore DHCP DNS with
+`Set-DnsClientServerAddress -ResetServerAddresses`, or restore the original
+static resolver values from `adapter-dns.json`; see the root README emergency
+procedure. Do not remove the saved adapter-state file before restoration.
 
-- Hardcoded-IP apps and VPN clients over 443 can't be caught by DNS alone;
-  the VPN port blocks and the standard-account rule cover most cases.
-- Service crash with DNS pointed at 127.0.0.1 means no internet. Recovery
-  action plus the watchdog should restart it within seconds.
-- Test every bypass from the brother's account before handing over.
+## Human verification required
+
+Before relying on Guardian, test it from a standard account on the target
+machine: adapter DNS changes, external DNS/DoT, browser Secure DNS, portable
+browsers, common VPN ports, service stop/termination, config/file writes,
+reboot recovery, new USB/VPN adapters, and manual DNS recovery. VPN/DoH over
+443, mobile data, hardcoded IP destinations, administrator access, and physical
+access remain explicit limitations even if those tests pass.

@@ -199,6 +199,10 @@ func TestPollOnceVerifiesEd25519Signature(t *testing.T) {
 	if store.Get().Version != 2 {
 		t.Fatalf("active version = %d, want 2", store.Get().Version)
 	}
+	tampered := append(append([]byte(nil), body...), ' ')
+	if err := verifySignature(tampered, keyPath, context.Background(), poller.Client, "github_test_token", *initial.Remote, server.URL); err == nil {
+		t.Fatal("signature verification accepted modified config bytes")
+	}
 }
 
 func remoteTestConfig(version uint64, signature bool) *config.Config {

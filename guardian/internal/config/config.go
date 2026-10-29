@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"guardian/internal/blocklist"
 )
 
 // Window is a daily time range in local time, "HH:MM". Overnight ranges
@@ -35,15 +37,15 @@ type RemoteSource struct {
 }
 
 type Config struct {
-	Version           uint64   `json:"version,omitempty"`
-	ListenAddr        string   `json:"listen_addr"`
-	UpstreamDoH       []string `json:"upstream_doh"`
-	BlockedServices   []string `json:"blocked_services"`
-	BlockedDomains    []string `json:"blocked_domains"`
-	AllowedDomains    []string `json:"allowed_domains"`
-	BlockDoHProviders bool     `json:"block_doh_providers"`
-	Bedtime           *Window  `json:"bedtime,omitempty"`
-	Timezone          string   `json:"timezone"`
+	Version           uint64        `json:"version,omitempty"`
+	ListenAddr        string        `json:"listen_addr"`
+	UpstreamDoH       []string      `json:"upstream_doh"`
+	BlockedServices   []string      `json:"blocked_services"`
+	BlockedDomains    []string      `json:"blocked_domains"`
+	AllowedDomains    []string      `json:"allowed_domains"`
+	BlockDoHProviders bool          `json:"block_doh_providers"`
+	Bedtime           *Window       `json:"bedtime,omitempty"`
+	Timezone          string        `json:"timezone"`
 	Remote            *RemoteSource `json:"remote,omitempty"`
 
 	loc              *time.Location
@@ -104,6 +106,11 @@ func (c *Config) validate() error {
 	}
 	if len(c.UpstreamDoH) == 0 {
 		return errors.New("upstream_doh: need at least one upstream")
+	}
+	for _, service := range c.BlockedServices {
+		if _, ok := blocklist.Preset(service); !ok {
+			return fmt.Errorf("blocked_services: unknown service %q", service)
+		}
 	}
 	for _, raw := range c.UpstreamDoH {
 		u, err := url.Parse(raw)

@@ -18,11 +18,11 @@ const (
 )
 
 type Event struct {
-	Time       time.Time `json:"time"`
-	Type       string    `json:"type"`
-	Message    string    `json:"message,omitempty"`
-	Category   string    `json:"category,omitempty"`
-	RepeatCount uint64   `json:"repeat_count,omitempty"`
+	Time        time.Time `json:"time"`
+	Type        string    `json:"type"`
+	Message     string    `json:"message,omitempty"`
+	Category    string    `json:"category,omitempty"`
+	RepeatCount uint64    `json:"repeat_count,omitempty"`
 }
 
 type EventSink interface {
@@ -30,13 +30,13 @@ type EventSink interface {
 }
 
 type Status struct {
-	ServiceStartedAt   time.Time            `json:"service_started_at"`
-	ConfigVersion      uint64               `json:"config_version"`
-	LastRemoteSync     SyncStatus           `json:"last_remote_sync"`
-	LastDrift          DriftStatus          `json:"last_drift"`
-	UpstreamHealth     string               `json:"upstream_health"`
-	Events             []Event              `json:"events"`
-	BlockedHitsPerDay  map[string]map[string]uint64 `json:"blocked_hits_per_day"`
+	ServiceStartedAt  time.Time                    `json:"service_started_at"`
+	ConfigVersion     uint64                       `json:"config_version"`
+	LastRemoteSync    SyncStatus                   `json:"last_remote_sync"`
+	LastDrift         DriftStatus                  `json:"last_drift"`
+	UpstreamHealth    string                       `json:"upstream_health"`
+	Events            []Event                      `json:"events"`
+	BlockedHitsPerDay map[string]map[string]uint64 `json:"blocked_hits_per_day"`
 }
 
 type SyncStatus struct {

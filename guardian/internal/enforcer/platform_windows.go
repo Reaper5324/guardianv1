@@ -67,13 +67,13 @@ func NewWindowsPlatform(stateDir string) (*WindowsPlatform, error) {
 func (p *WindowsPlatform) ListAdapters(ctx context.Context) ([]Adapter, error) {
 	const script = `
 $ErrorActionPreference = 'Stop'
-$result = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+$result = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object {
   $v4 = (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
   $v6 = (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses
   [pscustomobject]@{
     ID = [string]$_.InterfaceGuid
     Name = [string]$_.Name
-    Up = $true
+    Up = ($_.Status -eq 'Up')
     IPv4DNS = @($v4)
     IPv6DNS = @($v6)
   }
@@ -210,7 +210,6 @@ if (Test-Path -LiteralPath $backupPath) {
   $backup.Registry = @($loaded.Registry)
   $backup.Firefox = @($loaded.Firefox)
 }
-$changed = $false
 $registryPaths = @('SOFTWARE\Policies\Google\Chrome', 'SOFTWARE\Policies\Microsoft\Edge')
 foreach ($subkey in $registryPaths) {
   if (-not (@($backup.Registry | Where-Object { $_.Path -eq $subkey }).Count)) {
@@ -227,13 +226,6 @@ foreach ($subkey in $registryPaths) {
     }
     $backup.Registry += [pscustomobject]$entry
   }
-  $path = 'HKLM:\' + $subkey
-  if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null; $changed = $true }
-  $current = Get-ItemProperty -Path $path -Name DnsOverHttpsMode -ErrorAction SilentlyContinue
-  if ($null -eq $current -or $current.DnsOverHttpsMode -ne 'off') {
-    New-ItemProperty -Path $path -Name DnsOverHttpsMode -PropertyType String -Value 'off' -Force | Out-Null
-    $changed = $true
-  }
 }
 $programDirs = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432) | Where-Object { $_ } | Select-Object -Unique
 foreach ($root in $programDirs) {
@@ -244,16 +236,31 @@ foreach ($root in $programDirs) {
     $content = if ($exists) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($firefox)) } else { '' }
     $backup.Firefox += [pscustomobject]@{ Path = $firefox; Exists = $exists; Content = $content }
   }
+}
+$json = ConvertTo-Json -InputObject $backup -Depth 8
+$tmp = $backupPath + '.tmp'
+[IO.File]::WriteAllText($tmp, $json, [Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath $tmp -Destination $backupPath -Force
+
+$changed = $false
+foreach ($subkey in $registryPaths) {
+  $path = 'HKLM:\' + $subkey
+  if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null; $changed = $true }
+  $current = Get-ItemProperty -Path $path -Name DnsOverHttpsMode -ErrorAction SilentlyContinue
+  if ($null -eq $current -or $current.DnsOverHttpsMode -ne 'off') {
+    New-ItemProperty -Path $path -Name DnsOverHttpsMode -PropertyType String -Value 'off' -Force | Out-Null
+    $changed = $true
+  }
+}
+foreach ($root in $programDirs) {
+  $firefox = Join-Path $root 'Mozilla Firefox\distribution\policies.json'
+  if (-not (Test-Path (Split-Path -Parent $firefox))) { continue }
   $policy = '{"policies":{"DNSOverHTTPS":{"Enabled":false,"Locked":true}}}'
   if (-not (Test-Path -LiteralPath $firefox) -or [IO.File]::ReadAllText($firefox) -ne $policy) {
     [IO.File]::WriteAllText($firefox, $policy, [Text.UTF8Encoding]::new($false))
     $changed = $true
   }
 }
-$json = ConvertTo-Json -InputObject $backup -Depth 8
-$tmp = $backupPath + '.tmp'
-[IO.File]::WriteAllText($tmp, $json, [Text.UTF8Encoding]::new($false))
-Move-Item -LiteralPath $tmp -Destination $backupPath -Force
 ConvertTo-Json -InputObject $changed -Compress
 `
 	output, err := p.run(ctx, script, map[string]any{"PolicyBackup": backup})

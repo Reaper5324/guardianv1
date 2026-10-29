@@ -62,6 +62,31 @@ func TestLoadWithFallbackUsesBackupForInvalidPrimary(t *testing.T) {
 	}
 }
 
+func TestLoadWithFallbackDoesNotPromoteUnknownServicePreset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeTestConfig(t, path, `{"version":5,"blocked_domains":["known-good.example"]}`)
+	if _, _, err := LoadWithFallback(path); err != nil {
+		t.Fatal(err)
+	}
+	writeTestConfig(t, path, `{"version":99,"blocked_services":["not-a-preset"]}`)
+
+	cfg, usedFallback, err := LoadWithFallback(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usedFallback || cfg.Version != 5 || len(cfg.BlockedDomains) != 1 {
+		t.Fatalf("invalid preset config replaced last-known-good: cfg=%+v fallback=%v", cfg, usedFallback)
+	}
+	backup, err := Load(path + ".last-good.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backup.Version != 5 {
+		t.Fatalf("invalid preset config replaced backup with version %d", backup.Version)
+	}
+}
+
 func TestLoadWithFallbackRejectsVersionDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -19,18 +19,18 @@ import (
 const rulePrefix = "Guardian-"
 
 type Adapter struct {
-	ID        string
-	Name      string
-	Up        bool
-	IPv4DNS   []string
-	IPv6DNS   []string
+	ID      string
+	Name    string
+	Up      bool
+	IPv4DNS []string
+	IPv6DNS []string
 }
 
 type Rule struct {
-	Name           string
-	Protocol       string
-	RemotePort     string
-	RemoteAddress  string
+	Name          string
+	Protocol      string
+	RemotePort    string
+	RemoteAddress string
 }
 
 type AdapterBackend interface {

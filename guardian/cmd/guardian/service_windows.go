@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -62,16 +63,8 @@ func runService() {
 	}
 }
 
-func openLog() (*os.File, error) {
-	dir := dataDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	p := filepath.Join(dir, "guardian.log")
-	if st, err := os.Stat(p); err == nil && st.Size() > 5<<20 {
-		_ = os.Rename(p, p+".1") // simple rotation: keep one old log
-	}
-	return os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+func openLog() (*events.RotatingLogSink, error) {
+	return events.OpenRotatingLog(filepath.Join(dataDir(), "guardian.log"))
 }
 
 type handler struct{ cfgPath string }
@@ -118,8 +111,12 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, status chan<
 // registers an auto-start service running as SYSTEM, and sets recovery
 // actions so it restarts itself if it dies.
 func installService(srcConfig string) (retErr error) {
-	if _, err := config.Load(srcConfig); err != nil {
+	cfg, err := config.Load(srcConfig)
+	if err != nil {
 		return fmt.Errorf("config %s: %w", srcConfig, err)
+	}
+	if _, port, err := net.SplitHostPort(cfg.ListenAddr); err != nil || port != "53" {
+		return errors.New("install requires listen_addr to use port 53 for system DNS enforcement")
 	}
 	m, err := mgr.Connect()
 	if err != nil {
@@ -234,10 +231,10 @@ func installService(srcConfig string) (retErr error) {
 	if err := enforcer.Repair(ctx, data, installedConfig, nil); err != nil {
 		return fmt.Errorf("apply enforcement: %w", err)
 	}
-	installed = true
 	if err := enforcer.InstallWatchdog(ctx, exe); err != nil {
 		return fmt.Errorf("service is installed and enforcement is active, but watchdog installation failed: %w", err)
 	}
+	installed = true
 	fmt.Printf("Installed and started %s.\n  binary: %s\n  config: %s\n  log:    %s\n",
 		serviceName, exe, dstCfg, filepath.Join(data, "guardian.log"))
 	return nil
@@ -375,13 +372,21 @@ func showStatus() error {
 		fmt.Printf("Guardian firewall rules: %d present\n", len(rules))
 	}
 	weak := false
-	for _, path := range []string{
+	paths := []string{
 		filepath.Join(os.Getenv("ProgramFiles"), "Guardian"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Guardian", "guardian.exe"),
+		dataDir(),
 		filepath.Join(dataDir(), "config.json"),
+		filepath.Join(dataDir(), "config.json.last-good.json"),
+		filepath.Join(dataDir(), "github-token.txt"),
+		filepath.Join(dataDir(), "config-public.key"),
 		filepath.Join(dataDir(), "guardian.log"),
 		filepath.Join(dataDir(), "events.log"),
 		filepath.Join(dataDir(), "status.json"),
-	} {
+		filepath.Join(dataDir(), "adapter-dns.json"),
+		filepath.Join(dataDir(), "browser-policy-backup.json"),
+	}
+	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -395,6 +400,26 @@ func showStatus() error {
 			weak = true
 		} else if !ok {
 			fmt.Printf("ACL check %s: WEAK\n", path)
+			weak = true
+		}
+	}
+	if state == "Running" || state == "Stopped" {
+		if ok, checkErr := protectedServiceACL(); checkErr != nil {
+			fmt.Printf("Service ACL check: unavailable (%v)\n", checkErr)
+			weak = true
+		} else if !ok {
+			fmt.Println("Service ACL check: WEAK")
+			weak = true
+		}
+		taskPath := filepath.Join(os.Getenv("WINDIR"), "System32", "Tasks", "GuardianWatchdog")
+		if _, err := os.Stat(taskPath); err != nil {
+			fmt.Printf("Watchdog task ACL check: unavailable (%v)\n", err)
+			weak = true
+		} else if ok, checkErr := protectedACL(taskPath); checkErr != nil {
+			fmt.Printf("Watchdog task ACL check: unavailable (%v)\n", checkErr)
+			weak = true
+		} else if !ok {
+			fmt.Println("Watchdog task ACL check: WEAK")
 			weak = true
 		}
 	}
@@ -484,13 +509,46 @@ func protectedACL(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("icacls: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	acl := strings.ToLower(string(output))
-	for _, entry := range []string{"\\everyone:(", "\\users:(", "\\authenticated users:("} {
-		if strings.Contains(acl, entry) {
-			return false, nil
+	for _, line := range strings.Split(string(output), "\n") {
+		lower := strings.ToLower(line)
+		untrustedPrincipal := strings.Contains(lower, "\\everyone:") ||
+			strings.Contains(lower, "\\users:") ||
+			strings.Contains(lower, "\\authenticated users:") ||
+			strings.Contains(lower, "s-1-1-0:") ||
+			strings.Contains(lower, "s-1-5-11:") ||
+			strings.Contains(lower, "s-1-5-32-545:")
+		if !untrustedPrincipal {
+			continue
+		}
+		for _, match := range aclPermissionPattern.FindAllStringSubmatch(line, -1) {
+			switch strings.ToUpper(match[1]) {
+			case "F", "M", "W", "D", "DC", "DE", "WDAC", "WO", "AD", "WD", "WA", "WEA":
+				return false, nil
+			}
 		}
 	}
 	return true, nil
+}
+
+var aclPermissionPattern = regexp.MustCompile(`\(([^()]*)\)`)
+
+func protectedServiceACL() (bool, error) {
+	output, err := exec.Command("sc.exe", "sdshow", serviceName).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("sc sdshow: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	descriptor := strings.TrimSpace(string(output))
+	start := strings.Index(descriptor, "D:")
+	if start < 0 {
+		return false, errors.New("service security descriptor has no DACL")
+	}
+	dacl := descriptor[start:]
+	if sacl := strings.Index(dacl, "S:"); sacl >= 0 {
+		dacl = dacl[:sacl]
+	}
+	dacl = strings.TrimSpace(dacl)
+	expected := "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWRPWPDTLOCRRC;;;BA)"
+	return dacl == expected, nil
 }
 
 func formatTime(value time.Time) string {

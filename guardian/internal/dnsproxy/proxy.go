@@ -41,7 +41,7 @@ type snapshot struct {
 
 func New(store *config.Store) (*Proxy, error) {
 	p := &Proxy{
-		store:  store,
+		store: store,
 		client: &http.Client{
 			Timeout: 1800 * time.Millisecond,
 			Transport: &http.Transport{
@@ -88,11 +88,16 @@ func (p *Proxy) ApplyConfig(c *config.Config, commit func() error) error {
 	if c == nil {
 		return fmt.Errorf("config must not be nil")
 	}
-	next, err := makeSnapshot(config.Clone(c))
+	validatedStore := &config.Store{}
+	if err := validatedStore.Set(c); err != nil {
+		return err
+	}
+	validated := validatedStore.Get()
+	next, err := makeSnapshot(validated)
 	if err != nil {
 		return err
 	}
-	if err := p.store.Update(c, commit); err != nil {
+	if err := p.store.Update(validated, commit); err != nil {
 		return err
 	}
 	p.current.Store(next)
@@ -319,7 +324,7 @@ func (p *Proxy) ProbeUpstreams(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if response.Rcode != dns.RcodeSuccess {
+	if response.Rcode != dns.RcodeSuccess && response.Rcode != dns.RcodeNameError {
 		return fmt.Errorf("upstream returned DNS rcode %s", dns.RcodeToString[response.Rcode])
 	}
 	return nil

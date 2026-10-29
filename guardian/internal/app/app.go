@@ -24,7 +24,7 @@ func Run(ctx context.Context, cfgPath string) error {
 		return fmt.Errorf("config: %w", err)
 	}
 	if usedFallback {
-		log.Printf("primary config unavailable or older; using last-known-good config")
+		log.Printf("primary config unavailable or rejected; using last-known-good config")
 	}
 	store := &config.Store{}
 	if err := store.Set(cfg); err != nil {
@@ -68,6 +68,13 @@ func Run(ctx context.Context, cfgPath string) error {
 	}
 	hub.OnSinkError = func(err error) { log.Printf("events: %v", err) }
 	hub.Record(events.Event{Type: "service-started", Time: time.Now().UTC()})
+	if usedFallback {
+		message := "primary config invalid or unavailable; using last-known-good"
+		if primary, primaryErr := config.Load(cfgPath); primaryErr == nil && primary.Version < cfg.Version {
+			message = fmt.Sprintf("primary config version %d is older than last-known-good version %d", primary.Version, cfg.Version)
+		}
+		hub.Record(events.Event{Type: "config-rejected", Message: message})
+	}
 	proxy.OnBlockedCount = func(category string) { hub.CountBlocked(category) }
 
 	log.Printf("guardian listening on %s", cfg.ListenAddr)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const maxLogSize = 5 << 20
@@ -36,6 +37,24 @@ func OpenRotatingLog(path string) (*RotatingLogSink, error) {
 		return nil, err
 	}
 	return &RotatingLogSink{path: path, file: file, size: stat.Size()}, nil
+}
+
+func (s *RotatingLogSink) Write(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	message := string(data)
+	if len(message) > 0 && message[len(message)-1] == '\n' {
+		message = message[:len(message)-1]
+	}
+	if err := s.Emit(context.Background(), Event{
+		Time:    time.Now().UTC(),
+		Type:    "service-log",
+		Message: message,
+	}); err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 func (s *RotatingLogSink) Emit(_ context.Context, event Event) error {

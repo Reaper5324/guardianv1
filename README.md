@@ -1,31 +1,79 @@
 # Guardian
 
-Guardian is a small Go DNS filtering proxy intended for one Windows computer. It listens on a loopback address, blocks configured domains and selected service domains, optionally blocks all non-allowlisted names during a daily bedtime window, and forwards other DNS queries to upstream resolvers over DNS-over-HTTPS (DoH).
+Guardian is a Windows DNS-filtering service for one computer. It runs as
+LocalSystem, serves DNS on IPv4 and IPv6 loopback, forwards allowed queries
+over HTTPS to configured IP-literal DNS-over-HTTPS (DoH) upstreams, and applies
+local network and browser policies to make ordinary DNS bypass harder. Events,
+logs, and status are kept locally; Guardian sends no notifications.
 
-> **Current scope:** This repository contains the DNS proxy and Windows service wrapper. It does not yet configure network-adapter DNS, Windows Firewall, browser policies, VPN restrictions, remote configuration, or local event/status reporting. Installing the service alone does **not** make it impossible to bypass DNS filtering. See [Security limits](#security-limits).
+The service is intended to deter a curious **standard (non-administrator)
+account**. It is not a way to control an administrator or someone with
+physical access to the computer. Do not describe the controls as proven on a
+specific Windows machine until the manual checklist below has been run there.
 
-## How it works
+## What Guardian does
 
-1. A client sends a DNS query to Guardian's configured loopback address. The proxy serves both UDP and TCP DNS.
-2. Guardian checks the question name against suffix-based block and allow rules. For example, a rule for `example.com` also matches `www.example.com`; `notexample.com` does not match it. Allow rules take precedence over block rules.
-3. If a name is blocked, Guardian returns `NXDOMAIN`. If it is allowed, the proxy forwards the original DNS request to the configured DoH upstream IP-literal URLs.
-4. If every upstream fails, Guardian returns `SERVFAIL` rather than an unfiltered answer. Requests to upstreams are made directly, without using HTTP proxy environment settings.
-5. If bedtime is enabled, queries not on the allowlist are blocked during the configured local-time window. The start minute is included and the end minute is excluded; overnight windows such as 22:00–06:00 are supported.
+- Blocks configured domains and the Instagram, TikTok, and Snapchat presets
+  using suffix matching. An allowlist entry wins over a block entry.
+- Returns NXDOMAIN for blocked names and SERVFAIL when no DoH upstream can
+  answer. It never falls back to an unfiltered resolver.
+- Supports an optional local-time bedtime window. The start minute is
+  included, the end minute is excluded, and overnight windows are supported.
+- Listens on `127.0.0.1:53` and `[::1]:53` when configured for port 53.
+- Reconciles active adapter DNS, firewall rules, and browser policies every
+  ten seconds on Windows. The original DNS values are recorded so uninstall
+  can restore them, including for adapters that are disconnected at uninstall
+  time.
+- Blocks outbound DNS on ports 53 and TCP 853 to non-loopback addresses,
+  selected common VPN ports, and known public DoH resolver IPs. Configured
+  DoH upstream IPs are deliberately excluded from the IP blocks so the
+  SYSTEM service can reach them.
+- Sets Chrome and Edge `DnsOverHttpsMode=off` policies and Firefox's managed
+  `DNSOverHTTPS` policy when those browsers are installed.
+- Can poll a private GitHub repository every five minutes using ETags. The
+  read-only token is stored separately in the protected ProgramData folder.
+  Config revisions cannot be downgraded. Optional Ed25519 verification is
+  supported.
+- Keeps bounded local event and status files, an event-log source on Windows,
+  and a bounded DNS response cache. Status and event views are available from
+  the command line.
 
-The `block_doh_providers` option adds known DoH provider hostnames (including Firefox's `use-application-dns.net` canary) to the block rules. This only blocks those DNS names; it does not block direct-IP DoH clients or other unknown resolvers.
+The design choices and remaining limitations are described in
+[`guardian/DESIGN.md`](guardian/DESIGN.md).
 
-## Requirements
+## Limits and bypasses
 
-- Go 1.22 or later to build from source.
-- Windows for service installation. On other operating systems, the console runner is available for development; install/uninstall commands are Windows-only.
-- Administrator access to install or uninstall the Windows service and to change system DNS settings.
+Guardian is a local DNS control, not a complete network firewall or parental
+control suite:
 
-## Configure
+- It does not filter traffic over **mobile data** that bypasses this computer.
+- Applications that use hardcoded IP addresses can avoid DNS filtering.
+- **VPNs or DoH over TCP/UDP 443 cannot be fully stopped.** The rules block
+  listed public resolver IPs and common VPN ports, but alternate IPs,
+  tunneling, and portable software may bypass them.
+- Configured upstream resolver IPs are exempt from the DoH-IP block; a program
+  running as the child could potentially use those IPs directly.
+- Browser policies cover standard managed installations. Portable or
+  nonstandard browsers may not honor them.
+- An administrator can remove or modify the service, firewall rules, browser
+  policies, or files. Physical access is also outside the threat model.
+- If all upstreams are unreachable, filtered DNS returns SERVFAIL. This is
+  fail-closed behavior and can temporarily prevent name resolution.
 
-Start with [`config.example.json`](config.example.json) and save a copy as `config.json`. The example listens on `127.0.0.1:5353`, which is convenient for local testing. For normal Windows DNS use, set `listen_addr` to `127.0.0.1:53` and configure the adapter to use that address (adapter setup is manual and not performed by this project).
+Do not treat the list of resolver IPs as complete or permanently current.
+Review and update it when upstream or resolver choices change. VPNs over 443
+are explicitly a remaining limitation.
+
+## Configuration
+
+Copy [`guardian/config.example.json`](guardian/config.example.json) to a
+working directory and edit it. A normal system-wide configuration must use
+port 53; port 5353 is useful for local development but `guardian install`
+rejects it.
 
 ```json
 {
+  "version": 1,
   "listen_addr": "127.0.0.1:53",
   "upstream_doh": [
     "https://1.1.1.1/dns-query",
@@ -36,103 +84,178 @@ Start with [`config.example.json`](config.example.json) and save a copy as `conf
   "allowed_domains": [],
   "block_doh_providers": true,
   "bedtime": { "start": "22:00", "end": "06:00" },
-  "timezone": "Africa/Johannesburg"
+  "timezone": "Africa/Johannesburg",
+  "remote": {
+    "enabled": false,
+    "owner": "example-owner",
+    "repository": "guardian-config",
+    "branch": "main",
+    "path": "config.json",
+    "require_signature": false
+  }
 }
 ```
 
-Configuration fields:
+`remote` is optional. When enabled, set it to the private GitHub repository
+and path that contains the complete JSON configuration. Store the fine-grained,
+read-only token as plain token text in
+`%ProgramData%\Guardian\github-token.txt` (one line; no quotes). Never put the
+token in JSON or command-line arguments. The installer applies a
+SYSTEM/Administrators-only ACL to that directory. The downloaded config must
+have a version greater than the active version. A failed fetch, invalid
+config, or rejected signature leaves the active configuration unchanged.
 
-| Field | Meaning |
-|---|---|
-| `version` | Monotonically increasing configuration revision. Older revisions are rejected by the running config store; omitted versions are treated as `0` for compatibility. |
-| `listen_addr` | Loopback IP and port for the UDP and TCP DNS listeners. Use `127.0.0.1:53` for standard Windows DNS clients. |
-| `upstream_doh` | One or more HTTPS DoH URLs. Each URL must use an IP-literal host (not a hostname), for example `https://1.1.1.1/dns-query`. Guardian races configured upstreams and uses the first successful response, within a shared short deadline. |
-| `blocked_services` | Presets currently available: `instagram`, `tiktok`, and `snapchat`. |
-| `blocked_domains` | Additional domains to block, including their subdomains. |
-| `allowed_domains` | Domains exempt from block rules and bedtime blocking, including their subdomains. Allow rules win if a name also matches a block rule. |
-| `block_doh_providers` | Adds the built-in list of well-known DoH hostnames to the block rules. |
-| `bedtime` | Optional daily `start` and `end` values in 24-hour `HH:MM` format. Omit the field or set it to `null` to disable bedtime. Start and end must differ. |
-| `timezone` | IANA time-zone name used to evaluate bedtime, such as `Africa/Johannesburg` or `America/New_York`. |
-
-Unknown JSON fields, invalid domain rules, non-loopback listen addresses, hostnames in DoH upstream URLs, and invalid bedtime settings are rejected. At startup, Guardian saves a validated config as `config.json.last-good.json`. If the primary file is invalid, missing, or older than the saved version, it uses the last-known-good copy instead. Editing a file does not hot-reload the running process or service. Restart it after changing the configuration. The service installer keeps an already-existing installed config instead of replacing it with the supplied file.
-
-## Run from source
-
-From the repository root, build and run the console version:
-
-```sh
-cd guardian
-go build -o guardian ./cmd/guardian
-go run ./cmd/guardian run -config config.json
-```
-
-The process stays in the foreground until stopped. On Windows, use an elevated terminal if binding port 53 requires it on that system. For local testing with the example's port 5353, query it with a DNS client that supports a custom port, for example:
-
-```sh
-dig @127.0.0.1 -p 5353 example.com
-dig @127.0.0.1 -p 5353 instagram.com
-```
-
-The first query should be forwarded; a blocked name should return `NXDOMAIN`. To test bedtime, temporarily configure a window that includes the current time and query a non-allowlisted name.
-
-## Local dashboard
-
-The executable includes a responsive, read-only configuration dashboard; it has no external assets or runtime web dependencies. Start it with:
+When `require_signature` is true, the remote file must have a sibling
+`config.json.sig` (base64 Ed25519 signature over the exact config bytes), and
+`%ProgramData%\Guardian\config-public.key` must contain the base64 public key.
+Keep the private signing key off the child's computer. If signatures are
+enabled, provide the public key to `install.ps1`. Generate a keypair on a
+trusted administrator/developer machine, retain the private file securely,
+and upload only the public key:
 
 ```powershell
-.\guardian.exe ui -config .\config.json
+.\guardian.exe keygen -private .\guardian-config-private.key -public .\guardian-config-public.key
+.\guardian.exe sign -config .\repo\config.json -key .\guardian-config-private.key -out .\repo\config.json.sig
 ```
 
-Open `http://127.0.0.1:8765` on the same computer. The dashboard shows the loaded configuration version, configured service profiles, rule counts, listener, upstream count, and bedtime schedule. It binds only to IPv4 loopback, exposes counts rather than custom domain lists, and does not change settings. It is a configuration view, not a live check that the Windows service or network enforcement is healthy. Stop it with Ctrl+C.
+Commit `config.json` and its `.sig` together. The signature covers the exact
+file bytes; regenerate it after every edit. `keygen` and `sign` refuse to
+overwrite existing output files.
 
-## Install as a Windows service
+The parser rejects unknown JSON fields, invalid domains, unknown service
+presets, non-loopback listen addresses, and DoH URLs whose host is not an IP
+literal. A validated file is backed up as `config.json.last-good.json`; a bad,
+missing, or older primary file falls back to that copy at startup. Editing the
+local config does not hot-reload the service; use `guardian repair` for
+enforcement, and restart the service to load a local file change.
 
-Build the Windows executable on Windows, or cross-compile it on another platform from the repository root. For example, in a POSIX shell:
+## Build and local development
 
-```sh
-cd guardian
-GOOS=windows GOARCH=amd64 go build -o guardian.exe ./cmd/guardian
-```
-
-For a Windows ARM64 system, use `GOARCH=arm64` instead. Copy `guardian.exe` and `config.json` to the Windows computer. Open an **Administrator** PowerShell or Command Prompt in the directory containing them and install:
+From the repository root:
 
 ```powershell
-.\guardian.exe install -config .\config.json
-```
-
-The installer validates the supplied config, copies the executable under `%ProgramFiles%\Guardian`, and copies the config to `%ProgramData%\Guardian\config.json` if that destination does not already exist. It registers and starts the `GuardianDNS` automatic service and configures Windows service recovery actions. The data directory is restricted to SYSTEM and Administrators by the installer. The service log is written to `%ProgramData%\Guardian\guardian.log` when it can be opened.
-
-The installer does **not** change adapter DNS or firewall rules. After installation, the machine will only use Guardian if DNS clients are configured to query its listen address. On Windows, configure the active adapter's DNS server as `127.0.0.1` using an administrator account. If using a nonstandard port such as 5353, Windows system DNS settings generally cannot specify that port; use port 53 for system-wide DNS.
-
-To stop and remove the service, run as Administrator:
-
-```powershell
-.\guardian.exe uninstall
-```
-
-Uninstall leaves the installed executable and ProgramData files in place. Restore the adapter DNS setting to its prior value (or automatic) if Guardian is no longer running, or name resolution may stop working. To change the service configuration, edit `%ProgramData%\Guardian\config.json` with administrator rights and restart the service using Windows Services or an elevated `sc.exe` command. The service will not reread configuration until restarted.
-
-## Security limits
-
-Guardian filters DNS requests that reach it; DNS filtering alone is not device-wide enforcement. This version does not force adapters to use Guardian, block external DNS or DNS-over-TLS, disable browser DoH through managed policies, block VPNs, or stop applications that connect directly to IP addresses. A user who can change system settings, install software, or use an alternate network path may bypass it. A standard Windows account may have fewer options, but the protections described in the design document are not all implemented here.
-
-For meaningful resistance to bypass, an administrator must separately configure and test adapter DNS, firewall policy, browser policies, and account permissions on the actual Windows machine. Do not rely on this project to defeat someone with administrator access or physical control of the computer. Also consider the availability impact: if DNS is directed to Guardian and the service is stopped or its upstreams are unreachable, DNS queries will fail by design.
-
-## Development and tests
-
-Run the project checks from this directory:
-
-```sh
+Set-Location .\guardian
+go test ./...
 go vet ./...
 go test -race ./...
+go build .\cmd\guardian
 ```
 
-The project includes tests for config validation and bedtime boundaries, suffix matching and allowlist precedence, and proxy behavior using a local TLS DoH test server.
+To cross-compile the Windows executable:
 
-## Project layout
+```powershell
+$env:GOOS = 'windows'
+$env:GOARCH = 'amd64'
+go build -o .\guardian.exe .\cmd\guardian
+Remove-Item Env:GOOS, Env:GOARCH
+```
 
-- `cmd/guardian` — command-line entry point and Windows service lifecycle.
-- `internal/config` — configuration parsing, validation, bedtime logic, and atomic config store.
-- `internal/blocklist` — suffix matcher and built-in service/DoH-host rules.
-- `internal/dnsproxy` — UDP/TCP DNS server and DoH forwarding.
-- [`DESIGN.md`](DESIGN.md) — design goals, planned enforcement layers, and known risks.
+For console testing, use a loopback port other than 53 and a DNS client that
+supports a custom port. The production installer requires port 53.
+
+## Install and operate on Windows
+
+Build `guardian.exe` before transferring files; `install.ps1` never builds
+anything. Run this from an elevated PowerShell session with the supplied
+binary and config:
+
+```powershell
+.\install.ps1 -GuardianExe .\guardian.exe -ConfigPath .\config.json `
+  -TokenPath .\github-token.txt -PublicKeyPath .\config-public.key
+```
+
+Omit `-TokenPath` if remote configuration is disabled and omit
+`-PublicKeyPath` if signatures are not required. The script checks elevation
+and required files, protects ProgramData, provisions supplied token/public-key
+files, and invokes `guardian.exe install`. The service installer preserves an
+already-installed config during upgrades.
+
+Useful elevated or remote-session commands:
+
+```powershell
+& "$env:ProgramFiles\Guardian\guardian.exe" status
+& "$env:ProgramFiles\Guardian\guardian.exe" events -n 50
+& "$env:ProgramFiles\Guardian\guardian.exe" repair
+& "$env:ProgramFiles\Guardian\guardian.exe" uninstall
+```
+
+`status` reports service state, config version, adapter DNS, Guardian firewall
+rules, last remote sync, last drift, upstream health, and an ACL self-check.
+`events` reads the most recent locally persisted events. The default data
+folder is `%ProgramData%\Guardian`; `adapter-dns.json` contains the saved
+pre-Guardian DNS configuration. Use a remote admin session (such as RDP or
+SSH) to inspect these commands; Guardian does not send network alerts.
+
+## Manual standard-account verification
+
+Run these checks while signed in as the child's **standard account** after an
+administrator has installed Guardian. Use a harmless test domain such as
+`example.com` and the configured blocked domains. Do not test with a real
+unauthorized account or bypass service.
+
+| Test | Expected result |
+|---|---|
+| Try changing an adapter's DNS in Windows settings or an unelevated terminal. | The operation is denied or requires administrator credentials. `guardian status` continues to show `127.0.0.1` and `::1` on active adapters. |
+| Query a blocked domain through normal Windows DNS. | It returns NXDOMAIN. An allowlisted subdomain still resolves. |
+| Try an external resolver on UDP/TCP 53 or TCP 853. | The connection/query is blocked. |
+| Open Chrome or Edge Secure DNS settings and try to enable it. | The managed policy keeps Secure DNS off; `chrome://policy` or `edge://policy` should show the policy. |
+| Check Firefox's DNS-over-HTTPS setting and `about:policies`. | DNS-over-HTTPS is disabled and locked for a standard installation. |
+| Install a VPN that requires elevation and test its common ports. | Standard-account installation should be denied; listed VPN ports are blocked. A VPN that tunnels over 443 may still work and is a known limitation. |
+| Run a portable browser or a DoH client. | Managed browser policy may not apply. Known resolver IPs are blocked except configured upstream IPs; an alternate resolver or DoH/VPN over 443 may bypass filtering. Record any bypass as a limitation, not a pass. |
+| Try stopping or deleting `GuardianDNS` from Services or an unelevated shell. | The standard account is denied. |
+| Try editing `%ProgramData%\Guardian\config.json`, logs, status, token, or the installed binary. | Writes/deletion are denied. `guardian status` should report no weak ACLs. |
+| End `guardian.exe` from Task Manager. | A standard account should not be able to terminate the SYSTEM service process. If the service crashes, Windows recovery and the scheduled watchdog should restart/repair it. |
+| Reboot the computer. | The service starts automatically, listeners become available, and adapter DNS/enforcement is restored. |
+| Connect a USB tether or another new adapter. | Within the reconcile interval, its DNS is set to Guardian. Check `guardian status`; test DNS through it. |
+| Wait through an enabled bedtime window. | A non-allowlisted domain returns NXDOMAIN; allowlisted names continue to resolve. |
+| Disconnect upstream internet temporarily. | Queries return SERVFAIL, never answers from an unfiltered resolver. Restore connectivity and confirm `guardian status` reports healthy upstreams. |
+
+Use the system's normal change-management procedure for all network tests.
+Do not install an untrusted VPN or execute an unknown DoH client merely to test
+the filter.
+
+## Emergency recovery
+
+If name resolution breaks, use an administrator account or remote admin
+session. First try:
+
+```powershell
+& "$env:ProgramFiles\Guardian\guardian.exe" repair
+& "$env:ProgramFiles\Guardian\guardian.exe" status
+```
+
+To remove Guardian cleanly and restore saved adapter DNS:
+
+```powershell
+& "$env:ProgramFiles\Guardian\guardian.exe" uninstall
+```
+
+If the service executable is unavailable or uninstall cannot restore DNS,
+inspect `%ProgramData%\Guardian\adapter-dns.json` to recover each adapter's
+original IPv4/IPv6 DNS values. For adapters that previously used DHCP DNS, an
+administrator can restore automatic DNS with:
+
+```powershell
+Get-NetAdapter -IncludeHidden | ForEach-Object {
+  Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ResetServerAddresses
+  Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv6 -ResetServerAddresses
+}
+ipconfig /flushdns
+```
+
+`-ResetServerAddresses` restores DHCP-provided DNS; it is **not** appropriate
+for an adapter that previously had static DNS. For static settings, use the
+exact values saved in `adapter-dns.json` and restore them with
+`Set-DnsClientServerAddress -ServerAddresses`. Do not delete the saved state
+file until adapter DNS has been restored and verified.
+
+## Validation and Windows-only verification
+
+The repository includes tests for config validation and fallback, version
+rejection, bedtime boundaries/DST, blocklist precedence, the running DNS
+proxy, DoH failure, cache bounds/TTL, enforcement decisions with fakes,
+remote config/signatures, event deduplication, and status persistence.
+Windows firewall, adapter, browser policy, service ACL, scheduled-task ACL,
+and install/uninstall behavior still require testing on the target Windows
+version and hardware. Cross-compilation is not a substitute for that manual
+verification.

@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -134,5 +135,29 @@ func TestRotatingLogIsBoundedAndStructured(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".1"); err != nil {
 		t.Fatalf("rotated log missing: %v", err)
+	}
+}
+
+func TestRotatingLogWriterEncodesStructuredLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "guardian.log")
+	sink, err := OpenRotatingLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	message := "guardian listening on 127.0.0.1:53\n"
+	if n, err := sink.Write([]byte(message)); err != nil || n != len(message) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", n, err, len(message))
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event Event
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &event); err != nil {
+		t.Fatalf("decode structured log line: %v", err)
+	}
+	if event.Type != "service-log" || event.Message != strings.TrimSuffix(message, "\n") {
+		t.Fatalf("log event = %+v", event)
 	}
 }

@@ -24,6 +24,10 @@ const usage = `usage:
   guardian status                         show local service and filter status
   guardian events [-n 50]                 show recent local events
   guardian repair                         restore enforcement and start the service
+  guardian keygen -private <file> -public <file>
+                                          generate an Ed25519 config-signing keypair
+  guardian sign -config <file> -key <file> -out <file>
+                                          sign exact config bytes for remote updates
 `
 
 func main() {
@@ -66,6 +70,10 @@ func main() {
 		exitOnErr(showEvents(parseEventCount(args)))
 	case "repair":
 		exitOnErr(repairService())
+	case "keygen":
+		exitOnErr(generateSigningKeypair(args))
+	case "sign":
+		exitOnErr(signConfig(args))
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
