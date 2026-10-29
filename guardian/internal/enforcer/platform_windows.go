@@ -3,6 +3,7 @@
 package enforcer
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -28,11 +29,21 @@ func (execCommandRunner) Run(ctx context.Context, executable string, args, env [
 	if env != nil {
 		cmd.Env = mergeEnv(os.Environ(), env)
 	}
-	output, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w: %s", executable, err, strings.TrimSpace(string(output)))
+		details := strings.TrimSpace(strings.Join([]string{
+			strings.TrimSpace(stdout.String()),
+			strings.TrimSpace(stderr.String()),
+		}, "\n"))
+		if details != "" {
+			return nil, fmt.Errorf("%s: %w: %s", executable, err, details)
+		}
+		return nil, fmt.Errorf("%s: %w", executable, err)
 	}
-	return output, nil
+	return stdout.Bytes(), nil
 }
 
 type WindowsPlatform struct {
@@ -319,7 +330,8 @@ func (p *WindowsPlatform) run(ctx context.Context, script string, payload any) (
 		}
 		encodedPayload = string(data)
 	}
-	encodedScript := base64.StdEncoding.EncodeToString(encodePowerShell(script))
+	wrappedScript := "$ErrorActionPreference = 'Stop'\ntry {\n" + script + "\n} catch {\n[Console]::Error.WriteLine($_.ToString())\nexit 1\n}\n"
+	encodedScript := base64.StdEncoding.EncodeToString(encodePowerShell(wrappedScript))
 	return p.Runner.Run(ctx, "powershell.exe", []string{
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript,
 	}, []string{"GUARDIAN_PAYLOAD=" + encodedPayload, "GUARDIAN_POLICY_BACKUP=" + p.StateDir + `\browser-policy-backup.json`})
