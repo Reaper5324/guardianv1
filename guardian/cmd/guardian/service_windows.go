@@ -191,8 +191,7 @@ func installService(srcConfig string) (retErr error) {
 		return fmt.Errorf("copy binary: %w", err)
 	}
 	if err := replaceFile(stagedExe, exe); err != nil {
-		_ = os.Remove(stagedExe)
-		return fmt.Errorf("publish binary: %w", err)
+		return errors.Join(fmt.Errorf("publish binary: %w", err), removeManagedFile(stagedExe))
 	}
 	if _, err := os.Stat(dstCfg); os.IsNotExist(err) {
 		if err := copyFile(srcConfig, dstCfg, 0o600); err != nil {
@@ -624,37 +623,61 @@ func emptyAsUnknown(value string) string {
 func lockDownPath(path string) error {
 	output, err := exec.Command("icacls.exe", path, "/inheritance:r",
 		"/grant:r", "*S-1-5-18:(OI)(CI)F",
-		"/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C").CombinedOutput()
+		"/grant:r", "*S-1-5-32-544:(OI)(CI)F").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("icacls: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
 
+func lockDownFile(path string) error {
+	setAdministratorACL := func() ([]byte, error) {
+		return exec.Command("icacls.exe", path, "/inheritance:r",
+			"/grant:r", "*S-1-5-18:F",
+			"/grant:r", "*S-1-5-32-544:F").CombinedOutput()
+	}
+	output, err := setAdministratorACL()
+	if err == nil {
+		return nil
+	}
+	aclErr := fmt.Errorf("set SYSTEM and Administrators access: icacls.exe: %w: %s", err, strings.TrimSpace(string(output)))
+	output, err = exec.Command("takeown.exe", "/F", path, "/A").CombinedOutput()
+	if err != nil {
+		return errors.Join(aclErr, fmt.Errorf("take ownership as Administrators: takeown.exe: %w: %s", err, strings.TrimSpace(string(output))))
+	}
+	output, err = setAdministratorACL()
+	if err != nil {
+		return errors.Join(aclErr, fmt.Errorf("set SYSTEM and Administrators access after taking ownership: icacls.exe: %w: %s", err, strings.TrimSpace(string(output))))
+	}
+	return nil
+}
+
 func replaceFile(staged, destination string) error {
-	backup := destination + ".install-rollback"
-	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+	if err := removeManagedFile(destination + ".install-rollback"); err != nil {
 		return fmt.Errorf("remove stale install backup: %w", err)
 	}
-	hadDestination := false
-	if _, err := os.Stat(destination); err == nil {
-		if err := os.Rename(destination, backup); err != nil {
-			return fmt.Errorf("save previous binary: %w", err)
-		}
-		hadDestination = true
-	} else if !os.IsNotExist(err) {
-		return err
+	if err := removeManagedFile(destination); err != nil {
+		return fmt.Errorf("remove previous binary: %w", err)
 	}
 	if err := os.Rename(staged, destination); err != nil {
-		if hadDestination {
-			_ = os.Rename(backup, destination)
+		return fmt.Errorf("publish replacement binary: %w", err)
+	}
+	return nil
+}
+
+func removeManagedFile(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
+		if aclErr := lockDownFile(path); aclErr != nil {
+			return errors.Join(err, aclErr)
+		}
+	} else if err := lockDownFile(path); err != nil {
 		return err
 	}
-	if hadDestination {
-		if err := os.Remove(backup); err != nil {
-			return fmt.Errorf("remove previous binary backup: %w", err)
-		}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -664,10 +687,10 @@ func stopService(service *mgr.Service) error {
 	if err != nil {
 		return err
 	}
-	if status.State == svc.Stopped {
+	if status.State == svc.Stopped && status.ProcessId == 0 {
 		return nil
 	}
-	if status.State != svc.StopPending {
+	if status.State != svc.Stopped && status.State != svc.StopPending {
 		if _, err := service.Control(svc.Stop); err != nil {
 			return err
 		}
@@ -678,12 +701,12 @@ func stopService(service *mgr.Service) error {
 		if err != nil {
 			return err
 		}
-		if status.State == svc.Stopped {
+		if status.State == svc.Stopped && status.ProcessId == 0 {
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return errors.New("service did not stop within 30 seconds")
+	return fmt.Errorf("service did not fully stop within 30 seconds (state=%d, process id=%d)", status.State, status.ProcessId)
 }
 
 func waitForDNSListeners(ctx context.Context) error {
@@ -831,21 +854,15 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 		return err
 	}
 	progDir := filepath.Join(os.Getenv("ProgramFiles"), "Guardian")
-	data := dataDir()
 	exe := filepath.Join(progDir, "guardian.exe")
-	dstConfig := filepath.Join(data, "config.json")
-	if err := lockDownPath(progDir); err != nil {
-		return fmt.Errorf("secure Program Files: %w", err)
+	if err := enforcer.SetServiceSecurityDescriptor(context.Background(), serviceName); err != nil {
+		return fmt.Errorf("secure upgraded service: %w", err)
 	}
-	if err := ensureParentPassword(filepath.Join(data, "parent-auth.json")); err != nil {
+	if err := events.InstallWindowsEventLog(); err != nil {
 		return err
 	}
-	if _, err := os.Stat(dstConfig); errors.Is(err, os.ErrNotExist) {
-		if err := copyFile(srcConfig, dstConfig, 0o600); err != nil {
-			return fmt.Errorf("initialize installed config: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("inspect installed config: %w", err)
+	if err := lockDownPath(progDir); err != nil {
+		return fmt.Errorf("secure Program Files: %w", err)
 	}
 	if err := stopService(service); err != nil {
 		return fmt.Errorf("stop service for upgrade: %w", err)
@@ -853,75 +870,56 @@ func upgradeService(service *mgr.Service, srcConfig string) (retErr error) {
 	serviceHandled := false
 	defer func() {
 		if retErr != nil && !serviceHandled {
+			if _, err := os.Stat(exe); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("cannot restart Guardian because its installed executable cannot be verified; the service remains stopped: %w", err))
+				return
+			}
 			if err := service.Start(); err != nil {
-				retErr = errors.Join(retErr, fmt.Errorf("restart previous service: %w", err))
+				retErr = errors.Join(retErr, fmt.Errorf("restart Guardian service: %w", err))
 			}
 		}
 	}()
+	if err := lockDownFile(exe); err != nil {
+		return fmt.Errorf("secure installed executable for upgrade: %w", err)
+	}
 
-	rollback := exe + ".upgrade-rollback"
-	staged := exe + ".upgrade-new"
-	if err := os.Remove(rollback); err != nil && !os.IsNotExist(err) {
+	if err := removeManagedFile(exe + ".upgrade-rollback"); err != nil {
 		return fmt.Errorf("remove stale upgrade backup: %w", err)
 	}
-	if err := os.Remove(staged); err != nil && !os.IsNotExist(err) {
+	staged := exe + ".upgrade-new"
+	if err := removeManagedFile(staged); err != nil {
 		return fmt.Errorf("remove stale staged binary: %w", err)
 	}
 	if err := copyFile(self, staged, 0o755); err != nil {
 		return fmt.Errorf("stage upgraded binary: %w", err)
 	}
-	if err := os.Rename(exe, rollback); err != nil {
-		_ = os.Remove(staged)
-		return fmt.Errorf("save installed binary for rollback: %w", err)
+	if err := removeManagedFile(exe); err != nil {
+		return errors.Join(
+			fmt.Errorf("remove installed binary before upgrade: %w", err),
+			removeManagedFile(staged),
+		)
 	}
 	if err := os.Rename(staged, exe); err != nil {
-		_ = os.Rename(rollback, exe)
-		_ = os.Remove(staged)
-		return fmt.Errorf("publish upgraded binary: %w", err)
+		return errors.Join(
+			fmt.Errorf("publish upgraded binary after deleting the previous executable: %w", err),
+			removeManagedFile(staged),
+		)
 	}
 
-	restore := func(cause error) error {
-		serviceHandled = true
-		var failures []error
-		if err := stopService(service); err != nil {
-			failures = append(failures, fmt.Errorf("stop upgraded service: %w", err))
-			return errors.Join(append([]error{cause}, failures...)...)
-		}
-		if err := os.Remove(exe); err != nil && !os.IsNotExist(err) {
-			failures = append(failures, fmt.Errorf("remove upgraded binary: %w", err))
-		}
-		if err := os.Rename(rollback, exe); err != nil {
-			failures = append(failures, fmt.Errorf("restore previous binary: %w", err))
-		}
-		if err := service.Start(); err != nil {
-			failures = append(failures, fmt.Errorf("restart previous service: %w", err))
-		}
-		return errors.Join(append([]error{cause}, failures...)...)
-	}
-
-	if err := enforcer.SetServiceSecurityDescriptor(context.Background(), serviceName); err != nil {
-		return restore(fmt.Errorf("secure upgraded service: %w", err))
-	}
-	if err := events.InstallWindowsEventLog(); err != nil {
-		return restore(err)
-	}
 	if err := service.Start(); err != nil {
-		return restore(fmt.Errorf("start upgraded service: %w", err))
+		return fmt.Errorf("start upgraded service: %w", err)
 	}
+	serviceHandled = true
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := waitForDNSListeners(ctx); err != nil {
-		return restore(fmt.Errorf("wait for upgraded service: %w", err))
+		return fmt.Errorf("wait for upgraded service: %w", err)
 	}
 	if err := waitForServiceDashboard(ctx, service); err != nil {
-		return restore(fmt.Errorf("verify upgraded service configuration: %w", err))
+		return fmt.Errorf("verify upgraded service configuration: %w", err)
 	}
 	if err := enforcer.InstallWatchdog(ctx, exe); err != nil {
-		return restore(fmt.Errorf("install scheduled watchdog: %w", err))
-	}
-	serviceHandled = true
-	if err := os.Remove(rollback); err != nil {
-		return fmt.Errorf("remove upgrade rollback binary: %w", err)
+		return fmt.Errorf("install scheduled watchdog: %w", err)
 	}
 	fmt.Printf("Upgraded and restarted %s; existing config was preserved.\n", serviceName)
 	return nil

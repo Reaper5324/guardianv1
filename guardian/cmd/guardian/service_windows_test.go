@@ -17,7 +17,7 @@ func TestServiceDashboardReady(t *testing.T) {
 		},
 		{
 			name: "no active adapter",
-			body: `{"listen_addr":"127.0.0.1:53","dns_listeners_ready":true,"firewall_rule_count":8,"firewall_status":"Rules active","can_repair":true,"adapters":[]}`,
+			body: `{"listen_addr":"127.0.0.1:53","dns_listeners_ready":true,"firewall_rule_count":8,"can_repair":true,"adapters":[]}`,
 			want: true,
 		},
 		{
@@ -40,12 +40,15 @@ func TestServiceDashboardReady(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, _, err := serviceDashboardReady([]byte(test.body))
+			got, reason, err := serviceDashboardReady([]byte(test.body))
 			if err != nil {
 				t.Fatalf("check readiness: %v", err)
 			}
 			if got != test.want {
-				t.Fatalf("readiness = %t, want %t", got, test.want)
+				t.Fatalf("readiness = %t (%s), want %t", got, reason, test.want)
+			}
+			if !got && reason == "" {
+				t.Fatal("expected readiness failure reason")
 			}
 		})
 	}
